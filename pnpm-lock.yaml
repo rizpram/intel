@@ -1,0 +1,61 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Activity, CheckCircle2, ChevronDown, ChevronRight, CircleAlert, KeyRound, RefreshCw, Save, ShieldCheck, Sparkles, Zap } from "lucide-react";
+
+type Model = { id: string; provider_key: string; model_id: string; display_name: string; enabled: boolean; is_free: boolean; capabilities: string[]; context_window: number | null; supports_vision: boolean; supports_structured_output: boolean; health: string; latency_ms: number | null; usage_count: number; error_count: number; error_rate?: number | null; input_usd_per_million: number | null; output_usd_per_million: number | null; estimated_cost_usd: number; suitability_score: number; recommended: boolean; recommendation_reason: string | null };
+type Route = { task_key: string; label: string; enabled: boolean; preset: string; primary_model: string; fallback_model: string; second_opinion_model: string; judge_model: string; recommended_model: string; confidence_threshold: number; escalation_rules: string[]; consensus_enabled: boolean };
+type Provider = { id: string; provider: string; baseUrl: string; defaultModel: string; enabled: boolean; hasApiKey: boolean; monthlyBudget: number; status?: string; latency_ms?: number; error_status?: string; checked_at?: string };
+
+const providerCatalog = [
+  { id: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
+  { id: "gemini", name: "Google Gemini Direct", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai" },
+  { id: "openai", name: "OpenAI Direct", baseUrl: "https://api.openai.com/v1" },
+  { id: "xai", name: "xAI / Grok Direct", baseUrl: "https://api.x.ai/v1" },
+  { id: "custom", name: "Custom OpenAI-compatible", baseUrl: "" },
+];
+const taskCatalog = ["Sentiment","Emotion","Stance","Intent","Entity Extraction","Relevance","Spam / Noise Detection","Sarcasm Detection","Topic Classification","Narrative Clustering","Narrative Analysis","Trend Explanation","Crisis Analysis","Influencer Analysis","Multimodal Analysis","AI Analyst","Executive Summary","Report Generation"];
+const taskKey = (label: string) => label.toLowerCase().replaceAll(" / ", "_").replaceAll(" ", "_");
+const presets = ["ZERO COST","FAST","BALANCED","MAXIMUM ACCURACY","CRISIS MODE","CUSTOM"];
+const escalationRuleLabels: Record<string, string> = { confidence_below: "Confidence below threshold", sarcasm: "Sarcasm detected", conflicting_classifications: "Conflicting classifications", high_impact_author: "High-impact author", high_engagement: "High engagement", rapid_velocity: "Rapid narrative velocity", crisis_mention: "Crisis-related mention" };
+const routeModelFields: Record<string, keyof Route> = { primarymodel: "primary_model", fallbackmodel: "fallback_model", secondopinionmodel: "second_opinion_model", judgemodel: "judge_model" };
+
+export default function AiControlCenter() {
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [models, setModels] = useState<Model[]>([]);
+  const [routes, setRoutes] = useState<Route[]>([]);
+  const [preset, setPreset] = useState("ZERO COST");
+  const [globalBudget, setGlobalBudget] = useState(0);
+  const [encryptionReady, setEncryptionReady] = useState(false);
+  const [keys, setKeys] = useState<Record<string,string>>({});
+  const [bases, setBases] = useState<Record<string,string>>({});
+  const [budgets, setBudgets] = useState<Record<string,string>>({});
+  const [prices, setPrices] = useState<Record<string,string>>({});
+  const [expandedTask, setExpandedTask] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [message, setMessage] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch("/api/ai/control", { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "AI settings require a workspace administrator sign-in.");
+      setProviders(providerCatalog.map(item => data.providers.find((provider: Provider) => provider.provider === item.id) ?? { id: item.id, provider: item.id, baseUrl: item.baseUrl, defaultModel: "", enabled: false, hasApiKey: false, monthlyBudget: 0 }));
+      setModels(data.models ?? []); setRoutes(data.routes ?? []); setPreset(data.preset ?? "ZERO COST"); setGlobalBudget(data.globalBudgetUsd ?? 0); setEncryptionReady(Boolean(data.encryptionReady));
+      setBases(previous => Object.fromEntries(providerCatalog.map(item => [item.id, previous[item.id] ?? data.providers.find((provider: Provider) => provider.provider === item.id)?.baseUrl ?? item.baseUrl])));
+      setBudgets(previous => Object.fromEntries(providerCatalog.map(item => [item.id, previous[item.id] ?? String(data.providers.find((provider: Provider) => provider.provider === item.id)?.monthlyBudget ?? 0)])));
+      setMessage("");
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Could not load AI settings."); }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+
+  const modelsForDropdown = useMemo(() => models.filter(model => model.enabled && providers.some(provider => provider.provider === model.provider_key && provider.enabled)), [models, providers]);
+  async function post(url: string, body: unknown, key: string) {
+    setBusy(key); setMessage("");
+    try {
+      const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "The setting could not be saved.");
+      setMessage(data.discovered !== undefined ? `${data.discovered} models synced; ${data.newlyDisabled} newly discovered models remain disabled.` : data.latencyMs !== undefined ? `Connection healthy · ${data.latencyMs} ms${data.availableModels !== undefined ? ` · ${data.availableModels} models available` : ""}` : "AI routing settings saved.");
+      return data;
+    } catch (error) { setMes
