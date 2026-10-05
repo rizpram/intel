@@ -16,6 +16,7 @@ export async function proxy(request: NextRequest) {
     }
   }});
   const { data: { user } } = await supabase.auth.getUser();
+  if (!user && request.nextUrl.pathname.startsWith("/api/")) return NextResponse.json({error:"Sign in required."},{status:401});
   if (!user && request.nextUrl.pathname !== "/login") return NextResponse.redirect(new URL("/login", request.url));
   if (user && request.nextUrl.pathname === "/login") return NextResponse.redirect(new URL("/", request.url));
   return response;

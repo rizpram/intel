@@ -13,7 +13,7 @@ export async function GET() {
     if (error) throw error;
     const seenAt = heartbeat?.last_seen_at ? new Date(heartbeat.last_seen_at).getTime() : 0;
     const worker = seenAt > Date.now() - 90_000 ? "healthy" : heartbeat ? "stale" : "starting";
-    return NextResponse.json({ status: worker === "healthy" ? "ok" : "degraded", app: "rizpram-intelligence", database: "connected", workspace_count: data?.length ?? 0, worker, time: new Date().toISOString() });
+    return NextResponse.json({ status: worker === "healthy" ? "ok" : "degraded", app: "rizpram-intelligence", database: "connected", workspace_count: data?.length ?? 0, worker, time: new Date().toISOString() }, {status:worker === "healthy" ? 200 : 503});
   } catch {
     return NextResponse.json({ status: "unavailable", app: "rizpram-intelligence", database: "disconnected", worker: "unknown", time: new Date().toISOString() }, { status: 503 });
   }
