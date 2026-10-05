@@ -1,12 +1,7 @@
-{
-  "compilerOptions": {
-    "target": "ES2017", "lib": ["dom", "dom.iterable", "esnext"],
-    "allowJs": true, "skipLibCheck": true, "strict": true,
-    "noEmit": true, "esModuleInterop": true, "module": "esnext",
-    "moduleResolution": "bundler", "resolveJsonModule": true,
-    "isolatedModules": true, "jsx": "react-jsx", "incremental": true,
-    "plugins": [{ "name": "next" }], "paths": { "@/*": ["./src/*"] }
-  },
-  "include": ["next-env.d.ts", ".next/types/**/*.ts", ".next/dev/types/**/*.ts", "**/*.ts", "**/*.tsx"],
-  "exclude": ["node_modules"]
-}
+/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+import "./.next/dev/types/routes.d.ts";
+import "./.next/dev/types/root-params.d.ts";
+
+// NOTE: This file should not be edited
+// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.

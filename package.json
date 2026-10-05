@@ -1,1 +1,30 @@
-create policy service_heartbeat_service_role on public.service_heartbeats for all to service_role using (true) with check (true);
+{
+  "name": "rizpram-intelligence-ultimate",
+  "version": "1.0.0",
+  "packageManager": "pnpm@11.19.0",
+  "private": true,
+  "engines": { "node": ">=20.9" },
+  "scripts": {
+    "dev": "next dev --hostname 0.0.0.0",
+    "build": "next build",
+    "start": "next start --hostname 0.0.0.0",
+    "worker": "tsx worker/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@supabase/ssr": "0.12.7",
+    "@supabase/supabase-js": "2.110.8",
+    "lucide-react": "0.468.0",
+    "next": "16.3.8",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "recharts": "3.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.1",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3"
+  }
+}

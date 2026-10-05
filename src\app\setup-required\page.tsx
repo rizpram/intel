@@ -1,0 +1,1 @@
+export default function SetupRequired() { return <main className="login-page"><div className="login-card"><h1>Workspace setup required</h1><p>Configure the dedicated Supabase project URL and publishable key before opening this workspace.</p></div></main>; }
