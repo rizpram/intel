@@ -4,7 +4,7 @@ Standalone Next.js social and narrative intelligence workspace intended for `int
 
 ## Current state
 
-- The dashboard is a synthetic demo workspace. Demo conversations and metrics are illustrative, not live public data.
+- `DEMO_MODE=true` renders the synthetic preview. With `DEMO_MODE=false`, the dashboard reads authorized workspace data through `/api/workspace`, supports topic creation/selection, conversation search/filter/export, narratives, entities, observed engagement rankings, recorded network edges with timeline playback, alerts, JSON reports, audit logs and source-grounded AI answers. Seeded demo topics remain prominently labeled. Collected-data views are limited to 500 recent rows; no claim of complete platform coverage is made.
 - Source connectors are modular authorized-API adapter shells. They require provider OAuth credentials and official API endpoints; there is no scraping or credential collection from end users.
 - AI calls use a server-side free-first router: OpenRouter's `openrouter/free` by default, confidence-based direct-provider escalation, optional multi-model judging, and a custom OpenAI-compatible provider. Only `OPENROUTER_API_KEY` is needed initially; every direct provider and consensus is off by default. Paid providers require explicit per-provider enablement, configured token rates, a provider cap, and a global monthly cap. The `ai_usage` ledger records usage and estimated costs.
 - Database schema includes tenant scope, RBAC, RLS, audit, alerts, narrative clusters, entities, propagation edges, reports, AI provider settings, and a worker queue.
@@ -14,7 +14,7 @@ Standalone Next.js social and narrative intelligence workspace intended for `int
 
 1. Install Node.js 22 or newer and copy `.env.example` to `.env.local`.
 2. Set `DEMO_MODE=true` to preview without authentication or a connected database.
-3. Run `pnpm install`, then `pnpm dev`.
+3. Run `pnpm install --frozen-lockfile`, then `pnpm dev`.
 
 For production, set `DEMO_MODE=false`, configure the dedicated Supabase project URL and publishable key, then create workspace users through Supabase Auth. Add the first user to the seeded workspace with `insert into public.workspace_memberships(workspace_id,user_id,role) values ('10000000-0000-4000-8000-000000000001','<auth user uuid>','owner');`. Never expose `SUPABASE_SERVICE_ROLE_KEY` to browser code. The publishable URL/key are passed as Docker build arguments; all secret keys remain runtime-only.
 
@@ -42,3 +42,11 @@ Do not paste secrets into deployment notes or commit them. Do not alter `rizpram
 - `POST /api/ask` accepts `{ "question": "..." }`; topic evidence is retrieved server-side and citations are grounded to authorized records.
 - `GET /api/ai/health` checks configured provider `/models` endpoints for signed-in workspace administrators.
 - Worker jobs use `claim_worker_job()` with `FOR UPDATE SKIP LOCKED`; failures retry with exponential backoff.
+
+## Production blockers and scope
+
+The connected Supabase project currently contains one synthetic topic and three synthetic conversations, with no workspace memberships. A user must exist in Supabase Auth and be assigned to the isolated workspace before authenticated production testing. VPS access, DNS/TLS installation and external provider credentials remain required. API adapter shells require provider-specific pagination and rate-limit implementations before large-scale ingestion. Competitor comparison, member administration, scheduled alerts, and report PDF rendering are not complete. JSON report downloads are implemented; do not describe a JSON result as a generated PDF. No production deployment has been verified in this session.
+
+## Checks
+
+Run `pnpm test`, `pnpm typecheck`, and `DEMO_MODE=false pnpm build`. Connector contract tests cover malformed records, host authorization and query forwarding. Worker images include shared AI source and tsconfig path resolution. Worker leases refresh during processing and expired jobs retry after 15 minutes. The public health endpoint returns HTTP 503 until both database and worker are healthy.
