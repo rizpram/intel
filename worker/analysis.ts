@@ -79,6 +79,20 @@ export async function clusterTopic(db:SupabaseClient,topicId:string,workspaceId:
     const {error:alertError}=await db.from("alert_events").upsert({workspace_id:workspaceId,topic_id:topicId,title:"Negative conversation share elevated",summary:`${Math.round(negative*100)}% negative sentiment in the latest analyzed sample.`,severity:negative>=0.45?"critical":"high",status:"open",fingerprint:"negative-share-threshold"},{onConflict:"topic_id,fingerprint",ignoreDuplicates:true});
     if(alertError) throw alertError;
   }
+  const {data:rules,error:rulesError}=await db.from("alert_rules").select("id,name,rule,severity").eq("workspace_id",workspaceId).eq("is_enabled",true).or(`topic_id.eq.${topicId},topic_id.is.null`);
+  if(rulesError) throw rulesError;
+  const recentPosts=posts.filter(post=>new Date(post.published_at).getTime()>=Date.now()-60*60_000);
+  const evidenceIds=recentPosts.slice(0,30).map(post=>post.id);
+  const hourBucket=new Date();hourBucket.setUTCMinutes(0,0,0);
+  for(const rule of rules??[]) {
+    const metric=rule.rule?.metric;
+    const measured=metric==="mention_velocity"?recentPosts.length:metric==="negative_share"?(items.length?negative*100:0):null;
+    const threshold=Number(rule.rule?.threshold);
+    if(measured===null||!Number.isFinite(threshold)||measured<threshold) continue;
+    const title=String(rule.name||"Monitoring alert").slice(0,120);
+    const {error:alertError}=await db.from("alert_events").upsert({workspace_id:workspaceId,topic_id:topicId,rule_id:rule.id,title,summary:`${metric==="mention_velocity"?"Mentions in the last hour":"Negative conversation share"}: ${metric==="negative_share"?`${measured.toFixed(1)}%`:measured}; configured threshold: ${threshold}.`,severity:rule.severity,status:"open",fingerprint:`rule-${rule.id}-${hourBucket.toISOString()}`,evidence_conversation_ids:evidenceIds},{onConflict:"topic_id,fingerprint",ignoreDuplicates:true});
+    if(alertError) throw alertError;
+  }
 }
 
 export async function generateReport(db:SupabaseClient,reportId:string,workspaceId:string) {

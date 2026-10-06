@@ -5,14 +5,17 @@ import { routeCompletion } from "@/lib/ai/router";
 
 export const dynamic = "force-dynamic";
 export async function POST(request: NextRequest) {
-  const { question } = await request.json();
+  const body = await request.json().catch(() => ({}));
+  const { question } = body;
   if (typeof question !== "string" || question.trim().length < 3 || question.length > 1000) return NextResponse.json({ error: "Enter a question between 3 and 1,000 characters." }, { status: 400 });
   const db=await createClient();
   const {data:{user}}=await db.auth.getUser();
   if(!user) return NextResponse.json({error:"Sign in required."},{status:401});
   const {data:membership,error:membershipError}=await db.from("workspace_memberships").select("workspace_id").eq("user_id",user.id).order("created_at",{ascending:true}).limit(1).maybeSingle();
   if(membershipError||!membership) return NextResponse.json({error:"Workspace membership not found."},{status:403});
-  const {data:topic,error:topicError}=await db.from("monitoring_topics").select("id").eq("workspace_id",membership.workspace_id).eq("is_active",true).order("created_at",{ascending:true}).limit(1).maybeSingle();
+  let topicQuery=db.from("monitoring_topics").select("id").eq("workspace_id",membership.workspace_id).eq("is_active",true);
+  if(typeof body.topic_id==="string"&&body.topic_id) topicQuery=topicQuery.eq("id",body.topic_id);
+  const {data:topic,error:topicError}=await topicQuery.order("created_at",{ascending:true}).limit(1).maybeSingle();
   if(topicError||!topic) return NextResponse.json({answer:"No active monitoring topic is available to analyze.",citations:[]});
   const {data:rows,error:rowsError}=await db.from("conversations").select("id,source,canonical_url,author_name,content,published_at").eq("workspace_id",membership.workspace_id).eq("topic_id",topic.id).order("published_at",{ascending:false}).limit(20);
   if(rowsError) return NextResponse.json({error:"Could not retrieve workspace evidence."},{status:500});

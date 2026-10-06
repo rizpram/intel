@@ -37,6 +37,15 @@ export async function GET() {
     const observedCount = Number(row.usage_count || metric?.count || 0);
     const errorRate = observedCount ? Number(row.error_count || metric?.errors || 0) / observedCount : null;
     let suitability = Number(row.suitability_score || 0);
+    const modelId = `${row.provider_key}/${row.model_id}`.toLowerCase();
+    if (!suitability) {
+      suitability = 48 + (row.is_free ? 10 : 0) + (row.provider_key === "openrouter" ? 5 : 0);
+      if (/qwen|gemma|mistral/.test(modelId)) suitability += 7;
+      if (/mercury/.test(modelId)) suitability += 9;
+      if (/nemotron|deepseek/.test(modelId)) suitability += 7;
+      if (row.supports_structured_output) suitability += 4;
+      if (row.supports_vision) suitability += 2;
+    }
     if (observedCount) {
       const latencyScore = latency == null ? 0 : latency < 800 ? 10 : latency < 1800 ? 7 : latency < 3500 ? 4 : latency > 10000 ? -10 : 0;
       const reliabilityScore = (row.health === "healthy" ? 8 : row.health === "degraded" ? -5 : row.health === "unhealthy" ? -20 : 0) - (errorRate ?? 0) * 35;
@@ -44,13 +53,29 @@ export async function GET() {
     }
     return { ...row, usage_count: observedCount, estimated_cost_usd: Number(row.estimated_cost_usd || metric?.cost || 0), latency_ms: latency, error_rate: errorRate, suitability_score: suitability };
   });
+  const bestPerRoute = new Map<string, string>();
   const dynamicRoutes = (routes.data ?? []).map(route => {
     const preferFree = route.preset === "ZERO COST" || (route.preset === "BALANCED" && ["sentiment","emotion","stance","intent","entity_extraction","relevance","spam_noise","sarcasm","topic_classification"].includes(route.task_key));
     const needsVision = route.task_key === "multimodal_analysis";
     const candidates = modelRows.filter(model => model.enabled && providerEnabled.get(model.provider_key) && (!preferFree || model.is_free) && (!needsVision || model.supports_vision));
-    const best = [...candidates].sort((a,b) => Number(b.suitability_score) - Number(a.suitability_score))[0];
-    return { ...route, recommended_model: best ? `${best.provider_key}::${best.model_id}` : route.recommended_model };
+    const taskFit = (model: typeof candidates[number]) => {
+      const id = `${model.provider_key}/${model.model_id}`.toLowerCase();
+      let score = Number(model.suitability_score);
+      if (["sentiment","emotion","stance","intent","entity_extraction","relevance","spam_noise","sarcasm","topic_classification"].includes(route.task_key)) {
+        if (/mercury|qwen|gemma|mistral/.test(id)) score += 12;
+      } else if (["narrative_clustering","narrative_analysis","trend_explanation","crisis_analysis","influencer_analysis","ai_analyst","executive_summary","report_generation"].includes(route.task_key)) {
+        if (/nemotron|deepseek|llama|qwen/.test(id)) score += 12;
+      }
+      if (needsVision && model.supports_vision) score += 18;
+      return score;
+    };
+    const best = [...candidates].sort((a,b) => taskFit(b) - taskFit(a))[0];
+    const recommended = best ? `${best.provider_key}::${best.model_id}` : route.recommended_model;
+    if (best) bestPerRoute.set(route.task_key, recommended);
+    return { ...route, recommended_model: recommended };
   });
+  const recommendedModels = new Set(bestPerRoute.values());
+  for (const model of modelRows) model.recommended = recommendedModels.has(`${model.provider_key}::${model.model_id}`);
   return NextResponse.json({
     providers: providerRows.map(row => ({ id: row.id, provider: row.name, baseUrl: row.base_url, defaultModel: row.model, enabled: row.enabled, hasApiKey: credentialIds.has(row.id), monthlyBudget: Number(row.settings?.monthly_budget_usd ?? 0), ...healthById.get(row.id) })),
     models: modelRows,

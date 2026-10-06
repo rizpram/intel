@@ -24,19 +24,42 @@ async function processJob(job: any) {
   if (!secret) throw new Error(`Authorized credentials are not configured for ${connector.provider}.`);
   const adapter = getConnector(connector.provider);
   const records = await adapter.fetchRecent({ workspaceId: job.workspace_id, topicId: job.topic_id, connectorId: connector.id, query: topic.query, secret });
+  const propagation: Array<{ childId: string; childAuthor: string; parentExternalId: string; edgeType: string; occurredAt: string }> = [];
+  let insertedCount = 0;
   for (const post of records) {
     if (!post.externalId || !post.text || !post.publishedAt) continue;
-    const { data: saved, error } = await db.from("conversations").upsert({ workspace_id: job.workspace_id, topic_id: job.topic_id, connector_id: connector.id, external_id: post.externalId, source: connector.provider, canonical_url: post.canonicalUrl, author_id: post.authorId, author_name: post.authorName, author_handle: post.authorHandle, author_followers: post.followers ?? 0, content: post.text, language: post.language, published_at: post.publishedAt, reach: post.reach ?? 0, engagement: post.engagement ?? 0, raw_payload: post.raw ?? {} }, { onConflict: "connector_id,external_id" }).select("id").single();
+    const { data: inserted, error } = await db.from("conversations").upsert({ workspace_id: job.workspace_id, topic_id: job.topic_id, connector_id: connector.id, external_id: post.externalId, source: connector.provider, canonical_url: post.canonicalUrl, author_id: post.authorId, author_name: post.authorName, author_handle: post.authorHandle, author_followers: post.followers ?? 0, content: post.text, language: post.language, published_at: post.publishedAt, reach: post.reach ?? 0, engagement: post.engagement ?? 0, parent_external_id: post.parentExternalId ?? null, raw_payload: post.raw ?? {} }, { onConflict: "connector_id,external_id", ignoreDuplicates: true }).select("id").maybeSingle();
     if (error) throw error;
+    let savedId = inserted?.id as string | undefined;
+    if (!savedId) {
+      const { data: existing, error: lookupError } = await db.from("conversations").select("id").eq("connector_id", connector.id).eq("external_id", post.externalId).maybeSingle();
+      if (lookupError || !existing) throw lookupError ?? new Error("Existing conversation could not be retrieved.");
+      savedId = existing.id;
+    } else insertedCount++;
     if(post.authorId) {
       const {error:influencerError}=await db.from("influencer_profiles").upsert({workspace_id:job.workspace_id,source:connector.provider,external_profile_id:post.authorId,display_name:post.authorName,handle:post.authorHandle,profile_url:post.raw?.profile_url,follower_count:post.followers??0,influence_score:Math.min(100,Math.round(Math.log10(Math.max(1,post.followers??0))*14)),last_seen_at:new Date().toISOString(),metadata:{connector:connector.provider}},{onConflict:"workspace_id,source,external_profile_id"});
       if(influencerError) throw influencerError;
     }
-    const {error:queueError}=await db.from("worker_jobs").insert({workspace_id:job.workspace_id,topic_id:job.topic_id,job_type:"analyze_conversation",payload:{conversation_id:saved.id}});
-    if(queueError) throw queueError;
+    if (post.parentExternalId && post.authorId) propagation.push({ childId: savedId!, childAuthor: post.authorId, parentExternalId: post.parentExternalId, edgeType: post.edgeType || "reshare", occurredAt: post.publishedAt });
+    if (inserted) {
+      const {error:queueError}=await db.from("worker_jobs").insert({workspace_id:job.workspace_id,topic_id:job.topic_id,job_type:"analyze_conversation",payload:{conversation_id:savedId}});
+      if(queueError) throw queueError;
+    }
   }
-  const {error:clusterError}=await db.from("worker_jobs").insert({workspace_id:job.workspace_id,topic_id:job.topic_id,job_type:"cluster_topic",payload:{}});
-  if(clusterError) throw clusterError;
+  for (const event of propagation) {
+    const { data: parent, error: parentError } = await db.from("conversations").select("author_id").eq("connector_id", connector.id).eq("external_id", event.parentExternalId).maybeSingle();
+    if (parentError) throw parentError;
+    if (!parent?.author_id || parent.author_id === event.childAuthor) continue;
+    const { data: existingEdge, error: edgeLookupError } = await db.from("propagation_edges").select("id").eq("conversation_id", event.childId).eq("from_author_id", parent.author_id).eq("to_author_id", event.childAuthor).eq("edge_type", event.edgeType).limit(1).maybeSingle();
+    if (edgeLookupError) throw edgeLookupError;
+    if (existingEdge) continue;
+    const { error: edgeError } = await db.from("propagation_edges").insert({ workspace_id: job.workspace_id, topic_id: job.topic_id, from_author_id: parent.author_id, to_author_id: event.childAuthor, conversation_id: event.childId, edge_type: event.edgeType, occurred_at: event.occurredAt, weight: 1, metadata: { source: connector.provider, parent_external_id: event.parentExternalId } });
+    if (edgeError) throw edgeError;
+  }
+  if (insertedCount > 0) {
+    const {error:clusterError}=await db.from("worker_jobs").insert({workspace_id:job.workspace_id,topic_id:job.topic_id,job_type:"cluster_topic",payload:{}});
+    if(clusterError) throw clusterError;
+  }
   await db.from("connectors").update({ state: "connected", last_sync_at: new Date().toISOString(), last_error: null }).eq("id", connector.id);
 }
 
