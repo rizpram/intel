@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Activity, AlertTriangle, Bell, Bot, BriefcaseBusiness, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Command, GitFork, Globe2, Hash, LayoutDashboard, LifeBuoy, MessageCircle, Network, Plus, Search, Settings2, ShieldCheck, Sparkles, Users } from "lucide-react";
+import { Activity, AlertTriangle, Bell, Bot, BriefcaseBusiness, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Command, GitFork, Globe2, Hash, LayoutDashboard, LifeBuoy, Menu, MessageCircle, Network, Plus, Search, Settings2, ShieldCheck, Sparkles, Users } from "lucide-react";
 import ModuleWorkspace from "@/components/module-workspace";
 
 const nav = [
@@ -29,12 +29,14 @@ const pageHints: Record<string, string> = {
 export default function IntelligenceApp() {
   const [active, setActive] = useState("Command Center");
   const [showAlerts, setShowAlerts] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
   const [dashboard, setDashboard] = useState<Record<string, any>>({});
   const [selectedTopic, setSelectedTopic] = useState("");
   const [busy, setBusy] = useState(false);
   const isHome = active === "Command Center";
+  const navigateTo = (label: string) => { setActive(label); setMobileNavOpen(false); };
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -60,15 +62,16 @@ export default function IntelligenceApp() {
   }
 
   return <div className="shell">
-    <aside className="sidebar">
-      <div className="brand"><div className="brand-mark"><span>R</span></div><div><b>RIZPRAM</b><small>INTELLIGENCE</small></div><button className="icon-button sidebar-collapse" aria-label="Collapse navigation"><ChevronLeft size={15}/></button></div>
+    <aside className={`sidebar${mobileNavOpen ? " mobile-open" : ""}`}>
+      <div className="brand"><div className="brand-mark"><span>R</span></div><div><b>RIZPRAM</b><small>INTELLIGENCE</small></div><button className="icon-button sidebar-collapse" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)}><ChevronLeft size={15}/></button></div>
       <div className="workspace-switch"><div className="workspace-avatar">R</div><div className="workspace-label"><b>Workspace</b><small>Intelligence platform</small></div><ChevronDown size={14}/></div>
-      <button className="topic-select" onClick={() => setActive("Topics")}><span className="live-dot"/><span><small>MONITORING TOPIC</small><b>{dashboard.topics?.find((topic: any) => topic.id === selectedTopic)?.name ?? dashboard.topics?.[0]?.name ?? "No topic selected"}</b></span><ChevronDown size={14}/></button>
-      <nav>{nav.map(section => <section key={section.group}><div className="nav-group">{section.group}</div>{section.items.map(([label, Icon]) => <button key={label as string} onClick={() => setActive(label as string)} className={`nav-item ${active === label ? "active" : ""}`}><Icon size={17}/><span>{label as string}</span></button>)}</section>)}</nav>
-      <div className="sidebar-bottom"><button className={`nav-item ${active === "Settings" ? "active" : ""}`} onClick={() => setActive("Settings")}><Settings2 size={17}/><span>Settings</span></button><button className="nav-item"><CircleHelp size={17}/><span>Help center</span></button><div className="profile"><div className="profile-pic">R</div><div><b>Workspace</b><small>Intelligence user</small></div></div></div>
+      <button className="topic-select" onClick={() => navigateTo("Topics")}><span className="live-dot"/><span><small>MONITORING TOPIC</small><b>{dashboard.topics?.find((topic: any) => topic.id === selectedTopic)?.name ?? dashboard.topics?.[0]?.name ?? "No topic selected"}</b></span><ChevronDown size={14}/></button>
+      <nav>{nav.map(section => <section key={section.group}><div className="nav-group">{section.group}</div>{section.items.map(([label, Icon]) => <button key={label as string} onClick={() => navigateTo(label as string)} className={`nav-item ${active === label ? "active" : ""}`}><Icon size={17}/><span>{label as string}</span></button>)}</section>)}</nav>
+      <div className="sidebar-bottom"><button className={`nav-item ${active === "Settings" ? "active" : ""}`} onClick={() => navigateTo("Settings")}><Settings2 size={17}/><span>Settings</span></button><button className="nav-item"><CircleHelp size={17}/><span>Help center</span></button><div className="profile"><div className="profile-pic">R</div><div><b>Workspace</b><small>Intelligence user</small></div></div></div>
     </aside>
+    {mobileNavOpen && <button className="mobile-nav-backdrop" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)}/>}
     <main className="main-area">
-      <header className="topbar"><div className="crumb"><span>Workspace</span><ChevronRight size={14}/><b>{active}</b></div><div className="top-actions">{dashboard.topics?.length > 0 && <select className="dashboard-topic-select" value={selectedTopic} onChange={event => setSelectedTopic(event.target.value)} aria-label="Select monitoring topic"><option value="">All topics</option>{dashboard.topics.map((topic: any) => <option key={topic.id} value={topic.id}>{topic.name}</option>)}</select>}<div className="env-pill"><span className="green-pip"/> Workspace</div><button className="icon-button" aria-label="Search"><Search size={18}/></button><button className="icon-button alert-trigger" onClick={() => setShowAlerts(!showAlerts)} aria-label="Alerts"><Bell size={18}/></button></div>
+      <header className="topbar"><button className="mobile-menu" aria-label="Open navigation" onClick={() => setMobileNavOpen(true)}><Menu size={19}/></button><div className="crumb"><span>Workspace</span><ChevronRight size={14}/><b>{active}</b></div><div className="top-actions">{dashboard.topics?.length > 0 && <select className="dashboard-topic-select" value={selectedTopic} onChange={event => setSelectedTopic(event.target.value)} aria-label="Select monitoring topic"><option value="">All topics</option>{dashboard.topics.map((topic: any) => <option key={topic.id} value={topic.id}>{topic.name}</option>)}</select>}<div className="env-pill"><span className="green-pip"/> Workspace</div><button className="icon-button" aria-label="Search"><Search size={18}/></button><button className="icon-button alert-trigger" onClick={() => setShowAlerts(!showAlerts)} aria-label="Alerts"><Bell size={18}/></button></div>
         {showAlerts && <div className="alerts-popover"><strong>Alerts</strong><p>No alerts yet. Alerts will appear when connected data matches a rule.</p><button onClick={() => {setActive("Alerts & Reports");setShowAlerts(false)}}>Open alert center <ChevronRight size={13}/></button></div>}
       </header>
       <div className="content">
@@ -82,7 +85,7 @@ export default function IntelligenceApp() {
             <div className="card conversation-card"><div className="card-header"><div><h2>Live conversation</h2><p>Authorized source records for the selected topic.</p><button className="text-link" onClick={() => setActive("Conversation Explorer")}>Open explorer <ChevronRight size={14}/></button></div></div>{dashboard.conversations?.length ? dashboard.conversations.slice(0,3).map((row: any) => <div className="dashboard-conversation" key={row.id}><b>{row.author_name || row.source}</b><span>{row.source} · {new Date(row.published_at).toLocaleString()}</span><p>{row.content}</p></div>) : <div className="empty-module"><MessageCircle size={20}/><b>No conversations indexed</b><p>Connect a source provider to begin ingestion.</p></div>}</div>
             <div className="card analyst-card"><div className="card-header"><div><h2>Ask AI Analyst</h2><p>Answers will be grounded in your workspace data.</p></div><Bot size={18}/></div><div className="empty-module"><Sparkles size={20}/><b>Waiting for evidence</b><p>Add an authorized source and index conversations before asking questions.</p><textarea value={question} onChange={e=>setQuestion(e.target.value)} placeholder="Ask about your monitored conversations"/><button className="button-primary" disabled={busy||!question.trim()} onClick={askAnalyst}>{busy?"Thinking…":"Ask analyst"}</button>{answer&&<p role="status">{answer}</p>}</div></div>
           </section>
-        </> : <><section className="module-banner"><div className="module-icon"><Sparkles size={19}/></div><div><b>{active} workspace</b><p>{pageHints[active] ?? "Workspace security, roles, and configuration."}</p></div></section><ModuleWorkspace active={active}/></>}
+        </> : <><section className="module-banner"><div className="module-icon"><Sparkles size={19}/></div><div><b>{active} workspace</b><p>{pageHints[active] ?? "Workspace security, roles, and configuration."}</p></div></section><ModuleWorkspace active={active} onOpenTopic={topicId => { setSelectedTopic(topicId); setActive("Command Center"); }}/></>}
         <footer className="page-footer"><span>RIZPRAM INTELLIGENCE <b>·</b> v1.0.0</span><span>Waiting for authorized source data</span></footer>
       </div>
     </main>

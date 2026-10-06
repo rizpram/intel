@@ -4,6 +4,71 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 
+const topicSourceCatalog = [
+  { id: "news_web", name: "News / Web", provider: null, endpointEnv: null, secretEnv: null },
+  { id: "youtube", name: "YouTube", provider: null, endpointEnv: null, secretEnv: null },
+  { id: "reddit", name: "Reddit", provider: null, endpointEnv: null, secretEnv: null },
+  { id: "x", name: "X", provider: "x_api", endpointEnv: "X_API_SEARCH_URL", secretEnv: "CONNECTOR_SECRET_X_API" },
+  { id: "instagram", name: "Instagram", provider: "meta_graph", endpointEnv: "META_GRAPH_MENTIONS_URL", secretEnv: "CONNECTOR_SECRET_META_GRAPH" },
+  { id: "tiktok", name: "TikTok", provider: "tiktok_business", endpointEnv: "TIKTOK_BUSINESS_MENTIONS_URL", secretEnv: "CONNECTOR_SECRET_TIKTOK_BUSINESS" },
+  { id: "threads", name: "Threads", provider: "meta_graph", endpointEnv: "META_GRAPH_MENTIONS_URL", secretEnv: "CONNECTOR_SECRET_META_GRAPH" },
+];
+
+function cleanList(value: unknown, hashtag = false): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[\n,;]+/) : [];
+  const found = new Map<string, string>();
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    let normalized = item.trim().replace(/\s+/g, " ");
+    if (hashtag) normalized = `#${normalized.replace(/^#+/, "")}`;
+    if (!normalized || normalized === "#") continue;
+    const key = normalized.toLocaleLowerCase();
+    if (!found.has(key)) found.set(key, normalized);
+  }
+  return [...found.values()];
+}
+
+function searchText(keywords: string[], related: string[], hashtags: string[]) {
+  const terms = [...keywords, ...related, ...hashtags];
+  return terms.map(value => `"${value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`).join(" OR ").slice(0, 1000);
+}
+
+function topicQueryFromBody(body: Record<string, any>, existing: Record<string, any> = {}) {
+  const before = existing.query && typeof existing.query === "object" ? existing.query : {};
+  const primaryKeywords = cleanList(body.primaryKeywords ?? before.primary_keywords ?? body.query ?? before.text);
+  const relatedKeywords = cleanList(body.relatedKeywords ?? before.related_keywords);
+  const hashtags = cleanList(body.hashtags ?? before.hashtags, true);
+  const excludedKeywords = cleanList(body.excludedKeywords ?? before.excluded_keywords);
+  const sources = cleanList(body.sources ?? before.sources);
+  const language = String(body.language ?? before.language ?? "id");
+  const startsOn = String(body.startsOn ?? before.starts_on ?? "");
+  const endsOn = String(body.endsOn ?? before.ends_on ?? "");
+  const lifecycle = String(body.status ?? before.lifecycle ?? (existing.is_active === false ? "paused" : "active"));
+  const query = {
+    ...before,
+    text: searchText(primaryKeywords, relatedKeywords, hashtags),
+    primary_keywords: primaryKeywords,
+    related_keywords: relatedKeywords,
+    hashtags,
+    excluded_keywords: excludedKeywords,
+    sources,
+    language: ["id", "en", "all"].includes(language) ? language : "id",
+    starts_on: startsOn || null,
+    ends_on: endsOn || null,
+    lifecycle: ["active", "paused", "archived"].includes(lifecycle) ? lifecycle : "active",
+    ingestion: before.ingestion ?? { status: "idle" },
+  };
+  const languages = query.language === "all" ? ["id", "en"] : [query.language];
+  return { query, languages, primaryKeywords };
+}
+
+function connectorIsConfigured(row: Record<string, any>) {
+  const provider = String(row.provider ?? "");
+  const catalog = topicSourceCatalog.find(item => item.provider === provider);
+  if (!catalog?.endpointEnv || !catalog.secretEnv) return false;
+  return Boolean(process.env[catalog.endpointEnv] && process.env[row.auth_ref || catalog.secretEnv]);
+}
+
 async function context() {
   const db = await createClient();
   const { data: { user } } = await db.auth.getUser();
@@ -25,7 +90,27 @@ export async function GET(request: NextRequest) {
   if (resource === "topics") {
     const { data, error } = await scoped(db.from("monitoring_topics").select("id,name,description,query,languages,is_active,demo_mode,created_at,updated_at")).order("created_at", { ascending: false });
     if (error) return NextResponse.json({ error: "Could not load monitoring topics." }, { status: 500 });
-    return NextResponse.json({ topics: data ?? [] });
+    const { data: connectors, error: connectorError } = await scoped(db.from("connectors").select("id,provider,display_name,state,capabilities,last_sync_at,last_error"));
+    if (connectorError) return NextResponse.json({ error: "Could not load source availability." }, { status: 500 });
+    const connectorRows = connectors ?? [];
+    const providers = new Set(connectorRows.filter(connectorIsConfigured).map((row: any) => row.provider));
+    const sourceOptions: Array<{ id: string; name: string; provider: string | null; endpointEnv: string | null; secretEnv: string | null; configured: boolean; configurationLabel: string }> = topicSourceCatalog.map(source => ({ ...source, configured: Boolean(source.provider && providers.has(source.provider)), configurationLabel: source.provider && providers.has(source.provider) ? "Configured" : "Requires configuration" }));
+    for (const connector of connectorRows) {
+      if (topicSourceCatalog.some(source => source.provider === connector.provider)) continue;
+      sourceOptions.push({ id: `connector:${connector.provider}`, name: connector.display_name, provider: connector.provider, configured: false, endpointEnv: null, secretEnv: null, configurationLabel: "No worker adapter registered" });
+    }
+    const topicStats: Array<[string, { mentionCount: number; lastIngestionAt: string | null }]> = await Promise.all((data ?? []).map(async (topic: any) => {
+      const topicProviders = [...new Set((topic.query?.sources ?? []).map((id: string) => topicSourceCatalog.find(source => source.id === id)?.provider).filter(Boolean))];
+      const [{ count }, { data: latest }, connectorResult] = await Promise.all([
+        scoped(db.from("conversations").select("id", { count: "exact", head: true })).eq("topic_id", topic.id),
+        scoped(db.from("conversations").select("captured_at").eq("topic_id", topic.id).order("captured_at", { ascending: false }).limit(1).maybeSingle()),
+        topicProviders.length ? scoped(db.from("connectors").select("provider,last_sync_at")).in("provider", topicProviders) : Promise.resolve({ data: [], error: null }),
+      ]);
+      const lastConnectorSync = (connectorResult.data ?? []).map((row: any) => row.last_sync_at).filter(Boolean).sort().at(-1);
+      return [topic.id, { mentionCount: count ?? 0, lastIngestionAt: latest?.captured_at ?? lastConnectorSync ?? null }] as [string, { mentionCount: number; lastIngestionAt: string | null }];
+    }));
+    const stats = new Map<string, { mentionCount: number; lastIngestionAt: string | null }>(topicStats);
+    return NextResponse.json({ topics: (data ?? []).map((topic: any) => ({ ...topic, ...stats.get(topic.id), ingestionStatus: topic.query?.ingestion?.status ?? "idle" })), sources: sourceOptions });
   }
   if (resource === "connectors" || resource === "sources") {
     const { data, error } = await scoped(db.from("connectors").select("id,provider,display_name,state,capabilities,last_sync_at,last_error,config,created_at")).order("display_name");
@@ -128,11 +213,25 @@ export async function POST(request: NextRequest) {
 
   if (action === "create_topic") {
     const name = String(body.name ?? "").trim();
-    const queryText = String(body.query ?? "").trim();
-    if (name.length < 2 || name.length > 100 || queryText.length < 2 || queryText.length > 1000) return NextResponse.json({ error: "Enter a topic name and search query." }, { status: 400 });
-    const { data, error } = await db.from("monitoring_topics").insert({ workspace_id: workspaceId, name, description: String(body.description ?? "").slice(0, 500) || null, query: { text: queryText }, languages: ["id", "en"], created_by: user.id }).select("id,name,description,query,languages,is_active,created_at").single();
+    const { query, languages, primaryKeywords } = topicQueryFromBody(body);
+    if (name.length < 2 || name.length > 100) return NextResponse.json({ error: "Enter a topic name between 2 and 100 characters." }, { status: 400 });
+    if (!primaryKeywords.length) return NextResponse.json({ error: "Add at least one main keyword." }, { status: 400 });
+    if (query.starts_on && query.ends_on && query.starts_on > query.ends_on) return NextResponse.json({ error: "The monitoring end date must be the same as or later than its start date." }, { status: 400 });
+    const isActive = query.lifecycle === "active";
+    const { data, error } = await db.from("monitoring_topics").insert({ workspace_id: workspaceId, name, description: String(body.description ?? "").trim().slice(0, 500) || null, query, languages, is_active: isActive, created_by: user.id }).select("id,name,description,query,languages,is_active,created_at").single();
     if (error) return NextResponse.json({ error: "Could not create monitoring topic." }, { status: 500 });
-    return NextResponse.json({ topic: data }, { status: 201 });
+    const { error: queueError } = await createAdminClient().from("worker_jobs").insert({ workspace_id: workspaceId, topic_id: data.id, job_type: "prepare_topic", payload: {} });
+    if (queueError) {
+      const failedQuery = { ...query, ingestion: { status: "queue_error", message: "The topic was saved, but the worker could not be notified. Try refreshing or contact an administrator." } };
+      await createAdminClient().from("monitoring_topics").update({ query: failedQuery, updated_at: new Date().toISOString() }).eq("id", data.id).eq("workspace_id", workspaceId);
+      return NextResponse.json({ topic: { ...data, query: failedQuery }, workerStatus: "queue_error", message: failedQuery.ingestion.message }, { status: 201 });
+    }
+    const noSourceConfigured = !query.sources.length || !query.sources.some((sourceId: string) => {
+      const source = topicSourceCatalog.find(item => item.id === sourceId);
+      return Boolean(source?.provider && source.endpointEnv && source.secretEnv && process.env[source.endpointEnv] && process.env[source.secretEnv]);
+    });
+    const message = noSourceConfigured ? "Topic created successfully. Configure at least one data source to begin ingestion." : "Topic saved successfully. The worker was notified to prepare ingestion.";
+    return NextResponse.json({ topic: data, workerStatus: "queued", message }, { status: 201 });
   }
   if (action === "create_connector") {
     if (!["owner", "admin"].includes(role)) return NextResponse.json({ error: "Workspace admin access required." }, { status: 403 });
@@ -148,8 +247,10 @@ export async function POST(request: NextRequest) {
     if (!["owner", "admin"].includes(role)) return NextResponse.json({ error: "Workspace admin access required." }, { status: 403 });
     const connectorId = String(body.connectorId ?? ""), topicId = String(body.topicId ?? "");
     const { data: connector } = await db.from("connectors").select("id,provider,auth_ref,capabilities").eq("id", connectorId).eq("workspace_id", workspaceId).maybeSingle();
-    const { data: topic } = await db.from("monitoring_topics").select("id").eq("id", topicId).eq("workspace_id", workspaceId).eq("is_active", true).maybeSingle();
+    const { data: topic } = await db.from("monitoring_topics").select("id,query").eq("id", topicId).eq("workspace_id", workspaceId).eq("is_active", true).maybeSingle();
     if (!connector || !topic) return NextResponse.json({ error: "Choose a connector and active monitoring topic." }, { status: 400 });
+    const providerSources = Object.entries({ x_api: ["x"], meta_graph: ["instagram", "threads"], tiktok_business: ["tiktok"] }).find(([, providers]) => providers.includes(connector.provider))?.[1] ?? [];
+    if (Array.isArray(topic.query?.sources) && !topic.query.sources.some((source: string) => providerSources.includes(source))) return NextResponse.json({ error: "Select this source in the monitoring topic before syncing." }, { status: 409 });
     const endpointEnv = ({ x_api: "X_API_SEARCH_URL", meta_graph: "META_GRAPH_MENTIONS_URL", tiktok_business: "TIKTOK_BUSINESS_MENTIONS_URL" } as Record<string, string>)[connector.provider];
     if (!endpointEnv || !process.env[endpointEnv] || !process.env[connector.auth_ref ?? ""]) return NextResponse.json({ error: "Configure the official API endpoint and authorized credential in the worker's secure environment first." }, { status: 409 });
     const admin = createAdminClient();
@@ -174,8 +275,27 @@ export async function PATCH(request: NextRequest) {
   if ("response" in ctx) return ctx.response;
   if (!["owner", "admin", "analyst"].includes(ctx.role)) return NextResponse.json({ error: "Analyst access required." }, { status: 403 });
   const body = await request.json().catch(() => ({}));
-  if (body.action !== "resolve_alert" || typeof body.id !== "string") return NextResponse.json({ error: "Unsupported workspace update." }, { status: 400 });
-  const { error } = await ctx.db.from("alert_events").update({ status: "resolved", resolved_at: new Date().toISOString() }).eq("id", body.id).eq("workspace_id", ctx.workspaceId);
-  if (error) return NextResponse.json({ error: "Could not resolve alert." }, { status: 500 });
-  return NextResponse.json({ ok: true });
+  if (body.action === "resolve_alert" && typeof body.id === "string") {
+    const { error } = await ctx.db.from("alert_events").update({ status: "resolved", resolved_at: new Date().toISOString() }).eq("id", body.id).eq("workspace_id", ctx.workspaceId);
+    if (error) return NextResponse.json({ error: "Could not resolve alert." }, { status: 500 });
+    return NextResponse.json({ ok: true });
+  }
+  if (!(["update_topic", "set_topic_status"].includes(body.action) && typeof body.id === "string")) return NextResponse.json({ error: "Unsupported workspace update." }, { status: 400 });
+  const { data: existing, error: existingError } = await ctx.db.from("monitoring_topics").select("id,name,description,query,languages,is_active").eq("id", body.id).eq("workspace_id", ctx.workspaceId).maybeSingle();
+  if (existingError || !existing) return NextResponse.json({ error: "Monitoring topic not found." }, { status: 404 });
+  const incoming = body.action === "set_topic_status" ? { status: body.status } : body;
+  const nextName = body.action === "update_topic" ? String(body.name ?? "").trim() : existing.name;
+  const { query, languages, primaryKeywords } = topicQueryFromBody(incoming, existing);
+  if (body.action === "update_topic" && (nextName.length < 2 || nextName.length > 100)) return NextResponse.json({ error: "Enter a topic name between 2 and 100 characters." }, { status: 400 });
+  if (!primaryKeywords.length) return NextResponse.json({ error: "Add at least one main keyword." }, { status: 400 });
+  if (query.starts_on && query.ends_on && query.starts_on > query.ends_on) return NextResponse.json({ error: "The monitoring end date must be the same as or later than its start date." }, { status: 400 });
+  const isActive = query.lifecycle === "active";
+  const { data: topic, error } = await ctx.db.from("monitoring_topics").update({ name: nextName, description: body.action === "update_topic" ? String(body.description ?? "").trim().slice(0, 500) || null : existing.description, query, languages, is_active: isActive, updated_at: new Date().toISOString() }).eq("id", existing.id).eq("workspace_id", ctx.workspaceId).select("id,name,description,query,languages,is_active,created_at,updated_at").single();
+  if (error) return NextResponse.json({ error: "Could not update monitoring topic." }, { status: 500 });
+  if (isActive && body.action === "update_topic") await createAdminClient().from("worker_jobs").insert({ workspace_id: ctx.workspaceId, topic_id: topic.id, job_type: "prepare_topic", payload: {} });
+  const noSourceConfigured = !query.sources.length || !query.sources.some((sourceId: string) => {
+    const source = topicSourceCatalog.find(item => item.id === sourceId);
+    return Boolean(source?.provider && source.endpointEnv && source.secretEnv && process.env[source.endpointEnv] && process.env[source.secretEnv]);
+  });
+  return NextResponse.json({ topic, message: isActive && noSourceConfigured ? "Topic created successfully. Configure at least one data source to begin ingestion." : "Topic updated successfully." });
 }

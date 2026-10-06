@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Activity, AlertTriangle, CheckCircle2, Clock3, Download, Globe2, MessageCircle, Network, Plus, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
 import AiControlCenter from "@/components/ai-control-center";
+import TopicManager from "@/components/topic-manager";
 
 type Row = Record<string, any>;
 const sourceOptions = [{ id: "x_api", name: "X API" }, { id: "meta_graph", name: "Meta Graph API" }, { id: "tiktok_business", name: "TikTok Business API" }];
@@ -24,15 +25,13 @@ function Card({ children, className = "" }: { children: React.ReactNode; classNa
 function Head({ title, detail, children }: { title: string; detail: string; children?: React.ReactNode }) { return <div className="module-table-head"><div><h2>{title}</h2><p>{detail}</p></div>{children}</div>; }
 function Empty({ type }: { type: string }) { const [title, detail] = emptyText[type] ?? emptyText.conversations; return <div className="empty-module"><MessageCircle size={20}/><b>{title}</b><p>{detail}</p></div>; }
 
-export default function ModuleWorkspace({ active }: { active: string }) {
+export default function ModuleWorkspace({ active, onOpenTopic }: { active: string; onOpenTopic: (topicId: string) => void }) {
   const resource = resourceFor[active];
   const [data, setData] = useState<Record<string, any>>({});
   const [topics, setTopics] = useState<Row[]>([]);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [topicName, setTopicName] = useState("");
-  const [topicQuery, setTopicQuery] = useState("");
   const [provider, setProvider] = useState("x_api");
   const [selectedTopic, setSelectedTopic] = useState("");
   const [reportTitle, setReportTitle] = useState("");
@@ -95,7 +94,7 @@ export default function ModuleWorkspace({ active }: { active: string }) {
   return <section className="module-workspace">
     {error && <div className="ai-control-message error" role="alert">{error}</div>}{notice && <div className="ai-control-message" role="status">{notice}</div>}
     {resource !== "topics" && resource !== "connectors" && resource !== "sources" && topics.length > 0 && <label className="module-filter">Monitoring topic<select value={selectedTopic} onChange={event => setSelectedTopic(event.target.value)}><option value="">All active topics</option>{topics.map(topic => <option key={topic.id} value={topic.id}>{topic.name}</option>)}</select></label>}
-    {resource === "topics" && <Card><Head title="Monitoring topics" detail="Define phrases and filters to scope collection from authorized sources."/><form className="module-form" onSubmit={event => { event.preventDefault(); void mutate({ action: "create_topic", name: topicName, query: topicQuery }).then(result => { if (result) { setTopicName(""); setTopicQuery(""); } }); }}><label>Topic name<input value={topicName} onChange={e => setTopicName(e.target.value)} placeholder="Brand, campaign, or issue" required maxLength={100}/></label><label>Search query<input value={topicQuery} onChange={e => setTopicQuery(e.target.value)} placeholder='e.g. "RIZPRAM" OR #RIZPRAM' required maxLength={1000}/></label><button className="button-primary" disabled={busy}><Plus size={14}/> Create topic</button></form><div className="module-record-list">{rows.length ? rows.map(row => <div className="module-record" key={row.id}><div><b>{row.name}</b><p>{row.query?.text ?? row.description ?? "No query set"}</p></div><span className={`state-pill ${row.is_active ? "healthy" : "idle"}`}>{row.is_active ? "Active" : "Paused"}</span></div>) : <Empty type="topics"/>}</div></Card>}
+    {resource === "topics" && <TopicManager onOpenTopic={onOpenTopic}/>}
 
     {(resource === "connectors" || resource === "sources") && <Card><Head title="Authorized source connectors" detail="Use official APIs or authorized providers. Credentials stay in the server environment."/><div className="module-form"><label>Source provider<select value={provider} onChange={e => setProvider(e.target.value)}>{sourceOptions.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><button className="button-primary" disabled={busy} onClick={() => void mutate({ action: "create_connector", provider })}><Plus size={14}/> Add connector</button></div><div className="module-record-list">{rows.length ? rows.map(row => <div className="module-record connector-record" key={row.id}><div><b>{row.display_name}</b><p>{row.provider} · {row.capabilities?.endpoint_configured ? "API endpoint set" : "Endpoint needs setup"} · {row.capabilities?.credential_configured ? "Credential set" : "Credential needs setup"}</p><small>Last sync: {stamp(row.last_sync_at)}{row.last_error ? ` · ${row.last_error}` : ""}</small></div><span className={`state-pill ${row.state === "connected" ? "healthy" : "idle"}`}>{row.state}</span><button className="button-secondary" disabled={busy || !topics.length} onClick={() => { const id = selectedTopic || topics[0]?.id; if (id) void mutate({ action: "sync_connector", connectorId: row.id, topicId: id }); }}><RefreshCw size={13}/> Sync</button></div>) : <Empty type="connectors"/>}</div><p className="synthetic-note"><ShieldCheck size={13}/> No sample or demo conversations are inserted. Connector credentials must be placed in the worker's protected environment.</p></Card>}
 
