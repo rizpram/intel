@@ -7,7 +7,6 @@ export const dynamic = "force-dynamic";
 export async function POST(request: NextRequest) {
   const { question } = await request.json();
   if (typeof question !== "string" || question.trim().length < 3 || question.length > 1000) return NextResponse.json({ error: "Enter a question between 3 and 1,000 characters." }, { status: 400 });
-  if(process.env.DEMO_MODE==="true") return NextResponse.json({answer:"This preview contains synthetic demo posts only. Connect an authorized source and turn off demo mode to enable evidence-grounded answers.",citations:[],demo:true});
   const db=await createClient();
   const {data:{user}}=await db.auth.getUser();
   if(!user) return NextResponse.json({error:"Sign in required."},{status:401});

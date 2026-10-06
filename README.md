@@ -4,25 +4,25 @@ Standalone Next.js social and narrative intelligence workspace intended for `int
 
 ## Current state
 
-- The dashboard is a synthetic demo workspace. Demo conversations and metrics are illustrative, not live public data.
+- The workspace starts empty. No synthetic posts, metrics, alerts, or seeded monitoring topics are included.
 - Source connectors are modular authorized-API adapter shells. They require provider OAuth credentials and official API endpoints; there is no scraping or credential collection from end users.
 - AI calls use a server-side free-first router: OpenRouter's `openrouter/free` by default, confidence-based direct-provider escalation, optional multi-model judging, and a custom OpenAI-compatible provider. Only `OPENROUTER_API_KEY` is needed initially; every direct provider and consensus is off by default. Paid providers require explicit per-provider enablement, configured token rates, a provider cap, and a global monthly cap. The `ai_usage` ledger records usage and estimated costs.
 - Database schema includes tenant scope, RBAC, RLS, audit, alerts, narrative clusters, entities, propagation edges, reports, AI provider settings, and a worker queue.
-- `supabase/seed.sql` seeds a synthetic RIZPRAM Brand Health topic; URLs use the reserved `.invalid` domain.
+- `supabase/seed.sql` intentionally contains no sample data. Create a workspace and owner account during setup.
 
 ## Run locally
 
 1. Install Node.js 22 or newer and copy `.env.example` to `.env.local`.
-2. Set `DEMO_MODE=true` to preview without authentication or a connected database.
+2. Keep `DEMO_MODE=false`; authentication is required and synthetic data is not included.
 3. Run `pnpm install`, then `pnpm dev`.
 
-For production, set `DEMO_MODE=false`, configure the dedicated Supabase project URL and publishable key, then create workspace users through Supabase Auth. Add the first user to the seeded workspace with `insert into public.workspace_memberships(workspace_id,user_id,role) values ('10000000-0000-4000-8000-000000000001','<auth user uuid>','owner');`. Never expose `SUPABASE_SERVICE_ROLE_KEY` to browser code. The publishable URL/key are passed as Docker build arguments; all secret keys remain runtime-only.
+For production, configure the dedicated Supabase project URL and publishable key, create the first user through Supabase Auth, create a workspace, then add that user as its owner in `workspace_memberships`. Never expose `SUPABASE_SERVICE_ROLE_KEY` to browser code. The publishable URL/key are passed as Docker build arguments; all secret keys remain runtime-only.
 
 AI provider credentials entered in the Control Center are encrypted with AES-256-GCM before they are stored in the isolated database. Configure `AI_CREDENTIAL_ENCRYPTION_KEY` as a runtime-only secret containing base64 for 32 cryptographically random bytes (for example, generate with `openssl rand -base64 32`). Keep this key in the VPS secret store and back it up separately; rotating it requires re-encrypting stored provider credentials. `AI_ALLOW_PAID_PROVIDERS=false` and `AI_MONTHLY_BUDGET_USD=0` are the safe defaults; direct-provider calls remain blocked until the server guard, provider switch, per-provider cap, and model token rates are all configured.
 
 ## Database
 
-For a fresh environment, apply the current complete `supabase/schema.sql` once, then `supabase/seed.sql`. The isolated production project already has the schema, AI usage ledger, spend RPC, worker heartbeat, and synthetic seed. Do not apply these to the existing `rizpram-hq` project. The application enables `pgvector` in Supabase's `extensions` schema for narrative embeddings.
+For a fresh environment, apply the current complete `supabase/schema.sql` once. `supabase/seed.sql` is intentionally empty to prevent accidental demo data. The isolated production project has the schema, AI usage ledger, spend RPC, and worker heartbeat. Do not apply these to the existing `rizpram-hq` project. The application enables `pgvector` in Supabase's `extensions` schema for narrative embeddings.
 
 ## Standalone VPS deployment
 

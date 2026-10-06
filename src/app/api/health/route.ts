@@ -3,7 +3,6 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 export async function GET() {
-  if (process.env.DEMO_MODE === "true") return NextResponse.json({ status: "ok", app: "rizpram-intelligence", database: "demo", worker: "demo", time: new Date().toISOString() });
   try {
     const db = createAdminClient();
     const [{ data, error }, { data: heartbeat }] = await Promise.all([

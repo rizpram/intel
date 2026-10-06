@@ -6,7 +6,6 @@ export const dynamic = "force-dynamic";
 export async function POST(request: NextRequest) {
   const body=await request.json();
   if(typeof body.title!=="string"||body.title.length<3||body.title.length>120) return NextResponse.json({error:"Report title must be between 3 and 120 characters."},{status:400});
-  if(process.env.DEMO_MODE==="true") return NextResponse.json({id:"demo-report",status:"queued",demo:true}, {status:202});
   const db=await createClient();
   const {data:{user}}=await db.auth.getUser();
   if(!user) return NextResponse.json({error:"Sign in required."},{status:401});
