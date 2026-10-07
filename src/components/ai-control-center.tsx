@@ -74,8 +74,14 @@ export default function AiControlCenter() {
     if (data) await load();
   }
   async function toggleModel(model: Model) {
-    const data = await post("/api/ai/models", { providerKey: model.provider_key, modelId: model.model_id, enabled: !model.enabled }, `model-${model.id}`);
-    if (data) await load();
+    setBusy(`model-${model.id}`); setMessage("");
+    try {
+      const response = await fetch("/api/ai/models", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ providerKey: model.provider_key, modelId: model.model_id, enabled: !model.enabled }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "The model setting could not be saved.");
+      setMessage("Model setting saved."); await load();
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Request failed."); }
+    finally { setBusy(null); }
   }
   async function savePrices(model: Model) {
     const input = prices[`${model.id}:in`]?.trim() ? Number(prices[`${model.id}:in`]) : model.input_usd_per_million;
