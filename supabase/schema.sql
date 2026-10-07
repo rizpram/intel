@@ -29,6 +29,14 @@ create table public.connectors (
   auth_ref text, capabilities jsonb not null default '{}', last_sync_at timestamptz, last_error text,
   config jsonb not null default '{}', created_at timestamptz not null default now(), unique(workspace_id,provider)
 );
+create table public.connector_credentials (
+  connector_id uuid primary key references public.connectors(id) on delete cascade,
+  ciphertext text not null, updated_at timestamptz not null default now()
+);
+alter table public.connector_credentials enable row level security;
+revoke all privileges on table public.connector_credentials from public, anon, authenticated;
+grant all privileges on table public.connector_credentials to service_role;
+create policy connector_credentials_service_role_only on public.connector_credentials for all to service_role using (true) with check (true);
 create table public.conversations (
   id uuid primary key default gen_random_uuid(), workspace_id uuid not null references public.workspaces(id) on delete cascade,
   topic_id uuid not null references public.monitoring_topics(id) on delete cascade,

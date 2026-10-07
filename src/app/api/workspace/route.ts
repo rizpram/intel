@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { decryptCredential, encryptCredential } from "@/lib/ai/credentials";
+import { testMetaCredentials } from "../../../../worker/connectors/meta-graph";
 
 export const dynamic = "force-dynamic";
 
@@ -9,9 +11,10 @@ const topicSourceCatalog = [
   { id: "youtube", name: "YouTube", provider: null, endpointEnv: null, secretEnv: null },
   { id: "reddit", name: "Reddit", provider: null, endpointEnv: null, secretEnv: null },
   { id: "x", name: "X", provider: "x_api", endpointEnv: "X_API_SEARCH_URL", secretEnv: "CONNECTOR_SECRET_X_API" },
-  { id: "instagram", name: "Instagram", provider: "meta_graph", endpointEnv: "META_GRAPH_MENTIONS_URL", secretEnv: "CONNECTOR_SECRET_META_GRAPH" },
+  { id: "facebook", name: "Facebook Page", provider: "meta_graph", endpointEnv: null, secretEnv: null },
+  { id: "instagram", name: "Instagram professional", provider: "meta_graph", endpointEnv: null, secretEnv: null },
   { id: "tiktok", name: "TikTok", provider: "tiktok_business", endpointEnv: "TIKTOK_BUSINESS_MENTIONS_URL", secretEnv: "CONNECTOR_SECRET_TIKTOK_BUSINESS" },
-  { id: "threads", name: "Threads", provider: "meta_graph", endpointEnv: "META_GRAPH_MENTIONS_URL", secretEnv: "CONNECTOR_SECRET_META_GRAPH" },
+  { id: "threads", name: "Threads", provider: "meta_graph", endpointEnv: null, secretEnv: null },
 ];
 
 function cleanList(value: unknown, hashtag = false): string[] {
@@ -64,6 +67,7 @@ function topicQueryFromBody(body: Record<string, any>, existing: Record<string, 
 
 function connectorIsConfigured(row: Record<string, any>) {
   const provider = String(row.provider ?? "");
+  if (provider === "meta_graph") return Boolean(row.capabilities?.credential_configured && (row.capabilities?.facebook_configured || row.capabilities?.instagram_configured || row.capabilities?.threads_configured));
   const catalog = topicSourceCatalog.find(item => item.provider === provider);
   if (!catalog?.endpointEnv || !catalog.secretEnv) return false;
   return Boolean(process.env[catalog.endpointEnv] && process.env[row.auth_ref || catalog.secretEnv]);
@@ -90,11 +94,15 @@ export async function GET(request: NextRequest) {
   if (resource === "topics") {
     const { data, error } = await scoped(db.from("monitoring_topics").select("id,name,description,query,languages,is_active,demo_mode,created_at,updated_at")).order("created_at", { ascending: false });
     if (error) return NextResponse.json({ error: "Could not load monitoring topics." }, { status: 500 });
-    const { data: connectors, error: connectorError } = await scoped(db.from("connectors").select("id,provider,display_name,state,capabilities,last_sync_at,last_error"));
+    const { data: connectors, error: connectorError } = await scoped(db.from("connectors").select("id,provider,display_name,state,capabilities,last_sync_at,last_error,config"));
     if (connectorError) return NextResponse.json({ error: "Could not load source availability." }, { status: 500 });
     const connectorRows = connectors ?? [];
-    const providers = new Set(connectorRows.filter(connectorIsConfigured).map((row: any) => row.provider));
-    const sourceOptions: Array<{ id: string; name: string; provider: string | null; endpointEnv: string | null; secretEnv: string | null; configured: boolean; configurationLabel: string }> = topicSourceCatalog.map(source => ({ ...source, configured: Boolean(source.provider && providers.has(source.provider)), configurationLabel: source.provider && providers.has(source.provider) ? "Configured" : "Requires configuration" }));
+    const configuredRows = new Map(connectorRows.filter(connectorIsConfigured).map((row: any) => [row.provider, row]));
+    const sourceOptions: Array<{ id: string; name: string; provider: string | null; endpointEnv: string | null; secretEnv: string | null; configured: boolean; configurationLabel: string }> = topicSourceCatalog.map(source => {
+      const row: any = configuredRows.get(source.provider ?? "");
+      const platformConfigured = source.provider === "meta_graph" ? Boolean(row?.capabilities?.[`${source.id}_configured`]) : Boolean(row);
+      return { ...source, configured: platformConfigured, configurationLabel: platformConfigured ? "Configured" : "Requires configuration" };
+    });
     for (const connector of connectorRows) {
       if (topicSourceCatalog.some(source => source.provider === connector.provider)) continue;
       sourceOptions.push({ id: `connector:${connector.provider}`, name: connector.display_name, provider: connector.provider, configured: false, endpointEnv: null, secretEnv: null, configurationLabel: "No worker adapter registered" });
@@ -115,7 +123,14 @@ export async function GET(request: NextRequest) {
   if (resource === "connectors" || resource === "sources") {
     const { data, error } = await scoped(db.from("connectors").select("id,provider,display_name,state,capabilities,last_sync_at,last_error,config,created_at")).order("display_name");
     if (error) return NextResponse.json({ error: "Could not load connectors." }, { status: 500 });
-    return NextResponse.json({ connectors: data ?? [] });
+    const connectorRows = data ?? [];
+    const meta = connectorRows.find((row: any) => row.provider === "meta_graph");
+    if (meta) {
+      const admin = createAdminClient();
+      const { data: credential } = await admin.from("connector_credentials").select("connector_id").eq("connector_id", meta.id).maybeSingle();
+      meta.capabilities = { ...(meta.capabilities ?? {}), credential_configured: Boolean(credential) };
+    }
+    return NextResponse.json({ connectors: connectorRows });
   }
   if (resource === "conversations" || resource === "live" || resource === "explorer") {
     let query = scoped(db.from("conversations").select("id,topic_id,source,canonical_url,author_name,author_handle,author_followers,content,language,published_at,reach,engagement,conversation_analyses(sentiment,sentiment_score,emotions,stance,intent,entities)")).order("published_at", { ascending: false }).limit(limit);
@@ -226,34 +241,111 @@ export async function POST(request: NextRequest) {
       await createAdminClient().from("monitoring_topics").update({ query: failedQuery, updated_at: new Date().toISOString() }).eq("id", data.id).eq("workspace_id", workspaceId);
       return NextResponse.json({ topic: { ...data, query: failedQuery }, workerStatus: "queue_error", message: failedQuery.ingestion.message }, { status: 201 });
     }
+    const { data: sourceRows } = await db.from("connectors").select("provider,capabilities").eq("workspace_id", workspaceId);
     const noSourceConfigured = !query.sources.length || !query.sources.some((sourceId: string) => {
       const source = topicSourceCatalog.find(item => item.id === sourceId);
-      return Boolean(source?.provider && source.endpointEnv && source.secretEnv && process.env[source.endpointEnv] && process.env[source.secretEnv]);
+      if (!source?.provider) return false;
+      if (source.provider === "meta_graph") return Boolean(sourceRows?.some(row => row.provider === "meta_graph" && row.capabilities?.credential_configured && row.capabilities?.[`${source.id}_configured`]));
+      return Boolean(source.endpointEnv && source.secretEnv && process.env[source.endpointEnv] && process.env[source.secretEnv]);
     });
     const message = noSourceConfigured ? "Topic created successfully. Configure at least one data source to begin ingestion." : "Topic saved successfully. The worker was notified to prepare ingestion.";
     return NextResponse.json({ topic: data, workerStatus: "queued", message }, { status: 201 });
   }
   if (action === "create_connector") {
     if (!["owner", "admin"].includes(role)) return NextResponse.json({ error: "Workspace admin access required." }, { status: 403 });
-    const providers: Record<string, { name: string; endpointEnv: string }> = { x_api: { name: "X API", endpointEnv: "X_API_SEARCH_URL" }, meta_graph: { name: "Meta Graph API", endpointEnv: "META_GRAPH_MENTIONS_URL" }, tiktok_business: { name: "TikTok Business API", endpointEnv: "TIKTOK_BUSINESS_MENTIONS_URL" } };
+    const providers: Record<string, { name: string; endpointEnv: string | null }> = { x_api: { name: "X API", endpointEnv: "X_API_SEARCH_URL" }, meta_graph: { name: "Meta Graph API", endpointEnv: null }, tiktok_business: { name: "TikTok Business API", endpointEnv: "TIKTOK_BUSINESS_MENTIONS_URL" } };
     const provider = String(body.provider ?? "");
     const option = providers[provider];
     if (!option) return NextResponse.json({ error: "Select a supported official API connector." }, { status: 400 });
-    const { data, error } = await db.from("connectors").upsert({ workspace_id: workspaceId, provider, display_name: option.name, state: "disconnected", auth_ref: `CONNECTOR_SECRET_${provider.toUpperCase()}`, capabilities: { endpoint_configured: Boolean(process.env[option.endpointEnv]), credential_configured: Boolean(process.env[`CONNECTOR_SECRET_${provider.toUpperCase()}`]), authorized_api_only: true } }, { onConflict: "workspace_id,provider" }).select("id,provider,display_name,state,capabilities,last_sync_at,last_error").single();
+    const { data: existing } = await db.from("connectors").select("id,provider,display_name,state,capabilities,last_sync_at,last_error").eq("workspace_id", workspaceId).eq("provider", provider).maybeSingle();
+    if (existing) return NextResponse.json({ connector: existing }, { status: 200 });
+    const { data, error } = await db.from("connectors").insert({ workspace_id: workspaceId, provider, display_name: option.name, state: "disconnected", auth_ref: option.endpointEnv ? `CONNECTOR_SECRET_${provider.toUpperCase()}` : null, capabilities: { endpoint_configured: option.endpointEnv ? Boolean(process.env[option.endpointEnv]) : true, credential_configured: false, authorized_api_only: true } }).select("id,provider,display_name,state,capabilities,last_sync_at,last_error").single();
     if (error) return NextResponse.json({ error: "Could not save connector configuration." }, { status: 500 });
     return NextResponse.json({ connector: data }, { status: 201 });
+  }
+  if (action === "save_meta_config" || action === "test_meta_config") {
+    if (!["owner", "admin"].includes(role)) return NextResponse.json({ error: "Workspace admin access required." }, { status: 403 });
+    const admin = createAdminClient();
+    const { data: connector, error: connectorError } = await db.from("connectors").select("id,provider,config,capabilities,state").eq("workspace_id", workspaceId).eq("provider", "meta_graph").maybeSingle();
+    if (connectorError) return NextResponse.json({ error: "Could not load Meta connector." }, { status: 500 });
+    let connectorId = connector?.id as string | undefined;
+    let config = (connector?.config ?? {}) as Record<string, string>;
+    let capabilities = (connector?.capabilities ?? {}) as Record<string, any>;
+    if (action === "save_meta_config") {
+      const pairs = [
+        ["facebook_page_id", body.facebookPageId, "facebook_page", "facebookPageToken"],
+        ["instagram_account_id", body.instagramAccountId, "instagram", "instagramToken"],
+        ["threads_user_id", body.threadsUserId, "threads", "threadsToken"],
+      ] as const;
+      for (const [key, value, _tokenKey, tokenField] of pairs) {
+        const next = typeof value === "string" ? value.trim() : "";
+        if (next && (!/^[A-Za-z0-9._-]{1,128}$/.test(next))) return NextResponse.json({ error: "Meta account IDs may contain letters, numbers, dots, underscores, and hyphens." }, { status: 400 });
+        if (next) config = { ...config, [key]: next };
+        const token = typeof body[tokenField] === "string" ? body[tokenField].trim() : "";
+        if (token.length > 4096) return NextResponse.json({ error: "Access token is too long." }, { status: 400 });
+      }
+      const { data: priorCredential } = connectorId ? await admin.from("connector_credentials").select("ciphertext").eq("connector_id", connectorId).maybeSingle() : { data: null };
+      let credentials: Record<string, string> = {};
+      if (priorCredential?.ciphertext) {
+        try { credentials = JSON.parse(decryptCredential(priorCredential.ciphertext)); } catch { return NextResponse.json({ error: "Stored Meta credential cannot be decrypted. Re-enter tokens after checking the server encryption key." }, { status: 500 }); }
+      }
+      for (const [tokenKey, tokenField] of [["facebook_page", "facebookPageToken"], ["instagram", "instagramToken"], ["threads", "threadsToken"]] as const) {
+        const incoming = typeof body[tokenField] === "string" ? body[tokenField].trim() : "";
+        if (incoming) credentials[tokenKey] = incoming;
+      }
+      capabilities = {
+        ...capabilities,
+        authorized_api_only: true,
+        endpoint_configured: true,
+        credential_configured: Object.keys(credentials).length > 0,
+        facebook_configured: Boolean(config.facebook_page_id && credentials.facebook_page),
+        instagram_configured: Boolean(config.instagram_account_id && credentials.instagram),
+        threads_configured: Boolean(config.threads_user_id && credentials.threads),
+      };
+      const saved = await admin.from("connectors").upsert({ ...(connectorId ? { id: connectorId } : {}), workspace_id: workspaceId, provider: "meta_graph", display_name: "Meta Graph API", state: "disconnected", auth_ref: null, config, capabilities }, { onConflict: "workspace_id,provider" }).select("id").single();
+      if (saved.error) return NextResponse.json({ error: "Could not save Meta account configuration." }, { status: 500 });
+      connectorId = saved.data.id;
+      if (Object.keys(credentials).length) {
+        const { error } = await admin.from("connector_credentials").upsert({ connector_id: connectorId, ciphertext: encryptCredential(JSON.stringify(credentials)), updated_at: new Date().toISOString() }, { onConflict: "connector_id" });
+        if (error) return NextResponse.json({ error: "Account configuration was saved, but the encrypted token could not be stored." }, { status: 500 });
+      }
+      await admin.from("audit_logs").insert({ workspace_id: workspaceId, actor_id: user.id, action: "connector.meta_configured", resource_type: "connector", resource_id: connectorId, details: { account_ids: Object.keys(config), token_updated: Boolean(body.facebookPageToken || body.instagramToken || body.threadsToken) } });
+      return NextResponse.json({ ok: true, connectorId, capabilities: { ...capabilities, credential_configured: Boolean(Object.keys(credentials).length) } });
+    }
+    if (!connector) return NextResponse.json({ error: "Add Meta Graph API connector first." }, { status: 404 });
+    const { data: stored } = await admin.from("connector_credentials").select("ciphertext").eq("connector_id", connector.id).maybeSingle();
+    if (!stored?.ciphertext) return NextResponse.json({ error: "Save at least one authorized Meta account and access token first." }, { status: 409 });
+    let credentials: Record<string, string>;
+    try { credentials = JSON.parse(decryptCredential(stored.ciphertext)); } catch { return NextResponse.json({ error: "Stored Meta credential cannot be decrypted. Check the server encryption key." }, { status: 500 }); }
+    const results = await testMetaCredentials(config, credentials);
+    const checks = Object.values(results) as Array<{ ok: boolean; error?: string }>;
+    const ok = checks.length > 0 && checks.every(result => result.ok);
+    const partial = checks.some(result => result.ok);
+    const state = ok ? "connected" : partial ? "degraded" : "disconnected";
+    const safeError = checks.find(result => !result.ok)?.error ?? null;
+    await admin.from("connectors").update({ state, last_error: safeError, capabilities: { ...capabilities, credential_configured: true } }).eq("id", connector.id).eq("workspace_id", workspaceId);
+    await admin.from("audit_logs").insert({ workspace_id: workspaceId, actor_id: user.id, action: "connector.meta_tested", resource_type: "connector", resource_id: connector.id, details: { platforms_checked: Object.keys(results), success: ok } });
+    return NextResponse.json({ ok, results });
   }
   if (action === "sync_connector") {
     if (!["owner", "admin"].includes(role)) return NextResponse.json({ error: "Workspace admin access required." }, { status: 403 });
     const connectorId = String(body.connectorId ?? ""), topicId = String(body.topicId ?? "");
-    const { data: connector } = await db.from("connectors").select("id,provider,auth_ref,capabilities").eq("id", connectorId).eq("workspace_id", workspaceId).maybeSingle();
+    const { data: connector } = await db.from("connectors").select("id,provider,auth_ref,capabilities,config").eq("id", connectorId).eq("workspace_id", workspaceId).maybeSingle();
     const { data: topic } = await db.from("monitoring_topics").select("id,query").eq("id", topicId).eq("workspace_id", workspaceId).eq("is_active", true).maybeSingle();
     if (!connector || !topic) return NextResponse.json({ error: "Choose a connector and active monitoring topic." }, { status: 400 });
-    const providerSources = Object.entries({ x_api: ["x"], meta_graph: ["instagram", "threads"], tiktok_business: ["tiktok"] }).find(([, providers]) => providers.includes(connector.provider))?.[1] ?? [];
+    const providerSources = Object.entries({ x_api: ["x"], meta_graph: ["facebook", "instagram", "threads"], tiktok_business: ["tiktok"] }).find(([, providers]) => providers.includes(connector.provider))?.[1] ?? [];
     if (Array.isArray(topic.query?.sources) && !topic.query.sources.some((source: string) => providerSources.includes(source))) return NextResponse.json({ error: "Select this source in the monitoring topic before syncing." }, { status: 409 });
-    const endpointEnv = ({ x_api: "X_API_SEARCH_URL", meta_graph: "META_GRAPH_MENTIONS_URL", tiktok_business: "TIKTOK_BUSINESS_MENTIONS_URL" } as Record<string, string>)[connector.provider];
-    if (!endpointEnv || !process.env[endpointEnv] || !process.env[connector.auth_ref ?? ""]) return NextResponse.json({ error: "Configure the official API endpoint and authorized credential in the worker's secure environment first." }, { status: 409 });
     const admin = createAdminClient();
+    if (connector.provider === "meta_graph") {
+      const selectedMeta = (topic.query?.sources ?? []).filter((source: string) => providerSources.includes(source));
+      const configuredMeta = selectedMeta.some((source: string) => connector.capabilities?.[`${source}_configured`]);
+      if (!configuredMeta) return NextResponse.json({ error: "Configure an authorized Meta account for one of the sources selected in this topic before syncing." }, { status: 409 });
+      const { data: secure } = await admin.from("connector_credentials").select("connector_id").eq("connector_id", connectorId).maybeSingle();
+      if (!secure) return NextResponse.json({ error: "Save authorized Meta account credentials before syncing." }, { status: 409 });
+    } else {
+      const endpointEnv = ({ x_api: "X_API_SEARCH_URL", tiktok_business: "TIKTOK_BUSINESS_MENTIONS_URL" } as Record<string, string>)[connector.provider];
+      if (!endpointEnv || !process.env[endpointEnv] || !process.env[connector.auth_ref ?? ""]) return NextResponse.json({ error: "Configure the official API endpoint and authorized credential in the worker's secure environment first." }, { status: 409 });
+    }
     const { error } = await admin.from("worker_jobs").insert({ workspace_id: workspaceId, topic_id: topicId, job_type: "sync_connector", payload: { connector_id: connectorId } });
     if (error) return NextResponse.json({ error: "Could not queue source synchronization." }, { status: 503 });
     return NextResponse.json({ ok: true, status: "queued" }, { status: 202 });

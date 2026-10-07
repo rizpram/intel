@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { getConnector } from "./connectors";
 import { analyzeConversation, clusterTopic, generateReport } from "./analysis";
+import { decryptCredential } from "../src/lib/ai/credentials";
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -8,8 +9,8 @@ if (!url || !key) throw new Error("Worker requires NEXT_PUBLIC_SUPABASE_URL and 
 const db = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
 const delay = Number(process.env.WORKER_POLL_SECONDS ?? 10) * 1000;
 
-const sourceProviders: Record<string, string[]> = { x: ["x_api"], instagram: ["meta_graph"], threads: ["meta_graph"], tiktok: ["tiktok_business"] };
-const endpointByProvider: Record<string, string> = { x_api: "X_API_SEARCH_URL", meta_graph: "META_GRAPH_MENTIONS_URL", tiktok_business: "TIKTOK_BUSINESS_MENTIONS_URL" };
+const sourceProviders: Record<string, string[]> = { x: ["x_api"], facebook: ["meta_graph"], instagram: ["meta_graph"], threads: ["meta_graph"], tiktok: ["tiktok_business"] };
+const endpointByProvider: Record<string, string> = { x_api: "X_API_SEARCH_URL", tiktok_business: "TIKTOK_BUSINESS_MENTIONS_URL" };
 
 async function updateTopicIngestion(job: any, topic: any, patch: Record<string, unknown>) {
   const query = topic.query && typeof topic.query === "object" ? topic.query : {};
@@ -28,15 +29,29 @@ async function prepareTopic(job: any) {
   }
   const providers = [...new Set(selected.flatMap(source => sourceProviders[source] ?? (source.startsWith("connector:") ? [source.slice("connector:".length)] : [])))];
   const { data: connectors, error: connectorError } = providers.length
-    ? await db.from("connectors").select("id,provider,auth_ref,state").eq("workspace_id", job.workspace_id).in("provider", providers)
+    ? await db.from("connectors").select("id,provider,auth_ref,state,config,capabilities").eq("workspace_id", job.workspace_id).in("provider", providers)
     : { data: [], error: null };
   if (connectorError) throw connectorError;
-  const ready = (connectors ?? []).filter(connector => {
+  const readiness = await Promise.all((connectors ?? []).map(async (connector: any) => {
+    if (connector.provider === "meta_graph") {
+      const { data: credential } = await db.from("connector_credentials").select("ciphertext").eq("connector_id", connector.id).maybeSingle();
+      if (!credential || connector.state === "paused") return false;
+      try {
+        const tokens = JSON.parse(decryptCredential(credential.ciphertext));
+        const selectedMeta = selected.filter(source => sourceProviders[source]?.includes("meta_graph"));
+        return selectedMeta.some(source => {
+          const key = source === "facebook" ? "facebook_page" : source;
+          const idKey = source === "facebook" ? "facebook_page_id" : source === "instagram" ? "instagram_account_id" : "threads_user_id";
+          return Boolean(connector.config?.[idKey] && tokens[key]);
+        });
+      } catch { return false; }
+    }
     const endpoint = endpointByProvider[connector.provider];
     const secretName = connector.auth_ref || `CONNECTOR_SECRET_${connector.provider.toUpperCase()}`;
     if (!endpoint || !process.env[endpoint] || !process.env[secretName] || connector.state === "paused") return false;
     try { getConnector(connector.provider); return true; } catch { return false; }
-  });
+  }));
+  const ready = (connectors ?? []).filter((_: any, index: number) => readiness[index]);
   if (!ready.length) {
     await updateTopicIngestion(job, topic, { status: "waiting_for_source", checked_at: new Date().toISOString(), message: "Configure at least one data source to begin ingestion." });
     return;
@@ -54,7 +69,7 @@ async function processJob(job: any) {
   if (job.job_type !== "sync_connector") throw new Error(`Unsupported worker job: ${job.job_type}`);
   const [{ data: topic, error: topicError }, { data: connector, error: connectorError }] = await Promise.all([
     db.from("monitoring_topics").select("query,is_active").eq("id", job.topic_id).eq("workspace_id", job.workspace_id).single(),
-    db.from("connectors").select("id,provider,auth_ref,state").eq("id", job.payload.connector_id).single(),
+    db.from("connectors").select("id,provider,auth_ref,state,config").eq("id", job.payload.connector_id).eq("workspace_id", job.workspace_id).single(),
   ]);
   if (topicError || !topic) throw topicError ?? new Error("Monitoring topic not found.");
   if (connectorError || !connector) throw connectorError ?? new Error("Connector not found.");
@@ -62,12 +77,20 @@ async function processJob(job: any) {
   const selectedSources = Array.isArray(topic.query?.sources) ? topic.query.sources as string[] : null;
   const supportedForConnector = Object.entries(sourceProviders).filter(([, providers]) => providers.includes(connector.provider)).map(([source]) => source);
   if (selectedSources && !selectedSources.some(source => supportedForConnector.includes(source))) throw new Error("This connector is not selected for the monitoring topic.");
-  const secretName = connector.auth_ref || `CONNECTOR_SECRET_${connector.provider.toUpperCase()}`;
-  const secret = process.env[secretName];
+  let secret = "";
+  if (connector.provider === "meta_graph") {
+    const { data: credential, error: credentialError } = await db.from("connector_credentials").select("ciphertext").eq("connector_id", connector.id).maybeSingle();
+    if (credentialError) throw credentialError;
+    if (!credential) throw new Error("Meta authorized access tokens are not configured for this connector.");
+    secret = decryptCredential(credential.ciphertext);
+  } else {
+    const secretName = connector.auth_ref || `CONNECTOR_SECRET_${connector.provider.toUpperCase()}`;
+    secret = process.env[secretName] ?? "";
+  }
   if (!secret) throw new Error(`Authorized credentials are not configured for ${connector.provider}.`);
   await updateTopicIngestion(job, topic, { status: "ingesting", checked_at: new Date().toISOString() });
   const adapter = getConnector(connector.provider);
-  const rawRecords = await adapter.fetchRecent({ workspaceId: job.workspace_id, topicId: job.topic_id, connectorId: connector.id, query: topic.query, secret });
+  const rawRecords = await adapter.fetchRecent({ workspaceId: job.workspace_id, topicId: job.topic_id, connectorId: connector.id, query: topic.query, config: connector.config ?? {}, secret });
   const startsOn = typeof topic.query?.starts_on === "string" ? Date.parse(`${topic.query.starts_on}T00:00:00Z`) : NaN;
   const endsOn = typeof topic.query?.ends_on === "string" ? Date.parse(`${topic.query.ends_on}T23:59:59.999Z`) : NaN;
   const excludes = Array.isArray(topic.query?.excluded_keywords) ? (topic.query.excluded_keywords as string[]).map((value: string) => value.toLocaleLowerCase()) : [];
@@ -85,7 +108,7 @@ async function processJob(job: any) {
   let insertedCount = 0;
   for (const post of records) {
     if (!post.externalId || !post.text || !post.publishedAt) continue;
-    const { data: inserted, error } = await db.from("conversations").upsert({ workspace_id: job.workspace_id, topic_id: job.topic_id, connector_id: connector.id, external_id: post.externalId, source: connector.provider, canonical_url: post.canonicalUrl, author_id: post.authorId, author_name: post.authorName, author_handle: post.authorHandle, author_followers: post.followers ?? 0, content: post.text, language: post.language, published_at: post.publishedAt, reach: post.reach ?? 0, engagement: post.engagement ?? 0, parent_external_id: post.parentExternalId ?? null, raw_payload: post.raw ?? {} }, { onConflict: "connector_id,external_id", ignoreDuplicates: true }).select("id").maybeSingle();
+    const { data: inserted, error } = await db.from("conversations").upsert({ workspace_id: job.workspace_id, topic_id: job.topic_id, connector_id: connector.id, external_id: post.externalId, source: post.source ?? connector.provider, canonical_url: post.canonicalUrl, author_id: post.authorId, author_name: post.authorName, author_handle: post.authorHandle, author_followers: post.followers ?? 0, content: post.text, language: post.language, published_at: post.publishedAt, reach: post.reach ?? 0, engagement: post.engagement ?? 0, parent_external_id: post.parentExternalId ?? null, raw_payload: post.raw ?? {} }, { onConflict: "connector_id,external_id", ignoreDuplicates: true }).select("id").maybeSingle();
     if (error) throw error;
     let savedId = inserted?.id as string | undefined;
     if (!savedId) {
@@ -94,7 +117,7 @@ async function processJob(job: any) {
       savedId = existing.id;
     } else insertedCount++;
     if(post.authorId) {
-      const {error:influencerError}=await db.from("influencer_profiles").upsert({workspace_id:job.workspace_id,source:connector.provider,external_profile_id:post.authorId,display_name:post.authorName,handle:post.authorHandle,profile_url:post.raw?.profile_url,follower_count:post.followers??0,influence_score:Math.min(100,Math.round(Math.log10(Math.max(1,post.followers??0))*14)),last_seen_at:new Date().toISOString(),metadata:{connector:connector.provider}},{onConflict:"workspace_id,source,external_profile_id"});
+      const {error:influencerError}=await db.from("influencer_profiles").upsert({workspace_id:job.workspace_id,source:post.source ?? connector.provider,external_profile_id:post.authorId,display_name:post.authorName,handle:post.authorHandle,profile_url:post.raw?.profile_url,follower_count:post.followers??0,influence_score:Math.min(100,Math.round(Math.log10(Math.max(1,post.followers??0))*14)),last_seen_at:new Date().toISOString(),metadata:{connector:connector.provider}},{onConflict:"workspace_id,source,external_profile_id"});
       if(influencerError) throw influencerError;
     }
     if (post.parentExternalId && post.authorId) propagation.push({ childId: savedId!, childAuthor: post.authorId, parentExternalId: post.parentExternalId, edgeType: post.edgeType || "reshare", occurredAt: post.publishedAt });
