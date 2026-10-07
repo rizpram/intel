@@ -9,7 +9,7 @@ if (!url || !key) throw new Error("Worker requires NEXT_PUBLIC_SUPABASE_URL and 
 const db = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
 const delay = Number(process.env.WORKER_POLL_SECONDS ?? 10) * 1000;
 
-const sourceProviders: Record<string, string[]> = { x: ["x_api"], facebook: ["meta_graph"], instagram: ["meta_graph"], threads: ["meta_graph"], tiktok: ["tiktok_business"] };
+const sourceProviders: Record<string, string[]> = { news_web: ["public_news_rss"], x: ["x_api"], facebook: ["meta_graph"], instagram: ["meta_graph"], threads: ["meta_graph"], tiktok: ["tiktok_business"] };
 const endpointByProvider: Record<string, string> = { x_api: "X_API_SEARCH_URL", tiktok_business: "TIKTOK_BUSINESS_MENTIONS_URL" };
 
 async function updateTopicIngestion(job: any, topic: any, patch: Record<string, unknown>) {
@@ -33,6 +33,10 @@ async function prepareTopic(job: any) {
     : { data: [], error: null };
   if (connectorError) throw connectorError;
   const readiness = await Promise.all((connectors ?? []).map(async (connector: any) => {
+    if (connector.provider === "public_news_rss") {
+      if (connector.state === "paused") return false;
+      try { getConnector(connector.provider); return true; } catch { return false; }
+    }
     if (connector.provider === "meta_graph") {
       const { data: credential } = await db.from("connector_credentials").select("ciphertext").eq("connector_id", connector.id).maybeSingle();
       if (!credential || connector.state === "paused") return false;
@@ -87,7 +91,7 @@ async function processJob(job: any) {
     const secretName = connector.auth_ref || `CONNECTOR_SECRET_${connector.provider.toUpperCase()}`;
     secret = process.env[secretName] ?? "";
   }
-  if (!secret) throw new Error(`Authorized credentials are not configured for ${connector.provider}.`);
+  if (!secret && connector.provider !== "public_news_rss") throw new Error(`Authorized credentials are not configured for ${connector.provider}.`);
   await updateTopicIngestion(job, topic, { status: "ingesting", checked_at: new Date().toISOString() });
   const adapter = getConnector(connector.provider);
   const rawRecords = await adapter.fetchRecent({ workspaceId: job.workspace_id, topicId: job.topic_id, connectorId: connector.id, query: topic.query, config: connector.config ?? {}, secret });

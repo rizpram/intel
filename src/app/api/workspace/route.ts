@@ -7,7 +7,7 @@ import { testMetaCredentials } from "../../../../worker/connectors/meta-graph";
 export const dynamic = "force-dynamic";
 
 const topicSourceCatalog = [
-  { id: "news_web", name: "News / Web", provider: null, endpointEnv: null, secretEnv: null },
+  { id: "news_web", name: "News / Web", provider: "public_news_rss", endpointEnv: null, secretEnv: null },
   { id: "youtube", name: "YouTube", provider: null, endpointEnv: null, secretEnv: null },
   { id: "reddit", name: "Reddit", provider: null, endpointEnv: null, secretEnv: null },
   { id: "x", name: "X", provider: "x_api", endpointEnv: "X_API_SEARCH_URL", secretEnv: "CONNECTOR_SECRET_X_API" },
@@ -67,6 +67,7 @@ function topicQueryFromBody(body: Record<string, any>, existing: Record<string, 
 
 function connectorIsConfigured(row: Record<string, any>) {
   const provider = String(row.provider ?? "");
+  if (provider === "public_news_rss") return row.state !== "paused";
   if (provider === "meta_graph") return Boolean(row.capabilities?.credential_configured && (row.capabilities?.facebook_configured || row.capabilities?.instagram_configured || row.capabilities?.threads_configured));
   const catalog = topicSourceCatalog.find(item => item.provider === provider);
   if (!catalog?.endpointEnv || !catalog.secretEnv) return false;
@@ -241,11 +242,12 @@ export async function POST(request: NextRequest) {
       await createAdminClient().from("monitoring_topics").update({ query: failedQuery, updated_at: new Date().toISOString() }).eq("id", data.id).eq("workspace_id", workspaceId);
       return NextResponse.json({ topic: { ...data, query: failedQuery }, workerStatus: "queue_error", message: failedQuery.ingestion.message }, { status: 201 });
     }
-    const { data: sourceRows } = await db.from("connectors").select("provider,capabilities").eq("workspace_id", workspaceId);
+    const { data: sourceRows } = await db.from("connectors").select("provider,capabilities,state").eq("workspace_id", workspaceId);
     const noSourceConfigured = !query.sources.length || !query.sources.some((sourceId: string) => {
       const source = topicSourceCatalog.find(item => item.id === sourceId);
       if (!source?.provider) return false;
       if (source.provider === "meta_graph") return Boolean(sourceRows?.some(row => row.provider === "meta_graph" && row.capabilities?.credential_configured && row.capabilities?.[`${source.id}_configured`]));
+      if (source.provider === "public_news_rss") return Boolean(sourceRows?.some(row => row.provider === "public_news_rss" && row.state !== "paused"));
       return Boolean(source.endpointEnv && source.secretEnv && process.env[source.endpointEnv] && process.env[source.secretEnv]);
     });
     const message = noSourceConfigured ? "Topic created successfully. Configure at least one data source to begin ingestion." : "Topic saved successfully. The worker was notified to prepare ingestion.";
@@ -253,13 +255,13 @@ export async function POST(request: NextRequest) {
   }
   if (action === "create_connector") {
     if (!["owner", "admin"].includes(role)) return NextResponse.json({ error: "Workspace admin access required." }, { status: 403 });
-    const providers: Record<string, { name: string; endpointEnv: string | null }> = { x_api: { name: "X API", endpointEnv: "X_API_SEARCH_URL" }, meta_graph: { name: "Meta Graph API", endpointEnv: null }, tiktok_business: { name: "TikTok Business API", endpointEnv: "TIKTOK_BUSINESS_MENTIONS_URL" } };
+    const providers: Record<string, { name: string; endpointEnv: string | null }> = { public_news_rss: { name: "Public News / Web RSS", endpointEnv: null }, x_api: { name: "X API", endpointEnv: "X_API_SEARCH_URL" }, meta_graph: { name: "Meta Graph API", endpointEnv: null }, tiktok_business: { name: "TikTok Business API", endpointEnv: "TIKTOK_BUSINESS_MENTIONS_URL" } };
     const provider = String(body.provider ?? "");
     const option = providers[provider];
     if (!option) return NextResponse.json({ error: "Select a supported official API connector." }, { status: 400 });
     const { data: existing } = await db.from("connectors").select("id,provider,display_name,state,capabilities,last_sync_at,last_error").eq("workspace_id", workspaceId).eq("provider", provider).maybeSingle();
     if (existing) return NextResponse.json({ connector: existing }, { status: 200 });
-    const { data, error } = await db.from("connectors").insert({ workspace_id: workspaceId, provider, display_name: option.name, state: "disconnected", auth_ref: option.endpointEnv ? `CONNECTOR_SECRET_${provider.toUpperCase()}` : null, capabilities: { endpoint_configured: option.endpointEnv ? Boolean(process.env[option.endpointEnv]) : true, credential_configured: false, authorized_api_only: true } }).select("id,provider,display_name,state,capabilities,last_sync_at,last_error").single();
+    const { data, error } = await db.from("connectors").insert({ workspace_id: workspaceId, provider, display_name: option.name, state: "disconnected", auth_ref: option.endpointEnv ? `CONNECTOR_SECRET_${provider.toUpperCase()}` : null, capabilities: { endpoint_configured: option.endpointEnv ? Boolean(process.env[option.endpointEnv]) : true, credential_configured: false, authorized_api_only: provider !== "public_news_rss", public_feed: provider === "public_news_rss" } }).select("id,provider,display_name,state,capabilities,last_sync_at,last_error").single();
     if (error) return NextResponse.json({ error: "Could not save connector configuration." }, { status: 500 });
     return NextResponse.json({ connector: data }, { status: 201 });
   }
@@ -333,7 +335,7 @@ export async function POST(request: NextRequest) {
     const { data: connector } = await db.from("connectors").select("id,provider,auth_ref,capabilities,config").eq("id", connectorId).eq("workspace_id", workspaceId).maybeSingle();
     const { data: topic } = await db.from("monitoring_topics").select("id,query").eq("id", topicId).eq("workspace_id", workspaceId).eq("is_active", true).maybeSingle();
     if (!connector || !topic) return NextResponse.json({ error: "Choose a connector and active monitoring topic." }, { status: 400 });
-    const providerSources = Object.entries({ x_api: ["x"], meta_graph: ["facebook", "instagram", "threads"], tiktok_business: ["tiktok"] }).find(([, providers]) => providers.includes(connector.provider))?.[1] ?? [];
+    const providerSources = Object.entries({ public_news_rss: ["news_web"], x_api: ["x"], meta_graph: ["facebook", "instagram", "threads"], tiktok_business: ["tiktok"] }).find(([, providers]) => providers.includes(connector.provider))?.[1] ?? [];
     if (Array.isArray(topic.query?.sources) && !topic.query.sources.some((source: string) => providerSources.includes(source))) return NextResponse.json({ error: "Select this source in the monitoring topic before syncing." }, { status: 409 });
     const admin = createAdminClient();
     if (connector.provider === "meta_graph") {
@@ -342,7 +344,7 @@ export async function POST(request: NextRequest) {
       if (!configuredMeta) return NextResponse.json({ error: "Configure an authorized Meta account for one of the sources selected in this topic before syncing." }, { status: 409 });
       const { data: secure } = await admin.from("connector_credentials").select("connector_id").eq("connector_id", connectorId).maybeSingle();
       if (!secure) return NextResponse.json({ error: "Save authorized Meta account credentials before syncing." }, { status: 409 });
-    } else {
+    } else if (connector.provider !== "public_news_rss") {
       const endpointEnv = ({ x_api: "X_API_SEARCH_URL", tiktok_business: "TIKTOK_BUSINESS_MENTIONS_URL" } as Record<string, string>)[connector.provider];
       if (!endpointEnv || !process.env[endpointEnv] || !process.env[connector.auth_ref ?? ""]) return NextResponse.json({ error: "Configure the official API endpoint and authorized credential in the worker's secure environment first." }, { status: 409 });
     }
@@ -387,6 +389,7 @@ export async function PATCH(request: NextRequest) {
   if (isActive && body.action === "update_topic") await createAdminClient().from("worker_jobs").insert({ workspace_id: ctx.workspaceId, topic_id: topic.id, job_type: "prepare_topic", payload: {} });
   const noSourceConfigured = !query.sources.length || !query.sources.some((sourceId: string) => {
     const source = topicSourceCatalog.find(item => item.id === sourceId);
+    if (source?.provider === "public_news_rss") return true;
     return Boolean(source?.provider && source.endpointEnv && source.secretEnv && process.env[source.endpointEnv] && process.env[source.secretEnv]);
   });
   return NextResponse.json({ topic, message: isActive && noSourceConfigured ? "Topic created successfully. Configure at least one data source to begin ingestion." : "Topic updated successfully." });
