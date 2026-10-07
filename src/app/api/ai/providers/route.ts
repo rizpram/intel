@@ -74,14 +74,14 @@ export async function POST(request: NextRequest) {
     if (!result.ok) return NextResponse.json({ ok: false, status: health.error_status, latencyMs: latency }, { status: 502 });
     if (body.action === "test") return NextResponse.json({ ok: true, provider, latencyMs: latency, availableModels: result.models.length });
 
-    const { data: currentModels } = await admin.from("ai_models").select("model_id,enabled,recommended,suitability_score,recommendation_reason").eq("workspace_id", workspaceId).eq("provider_key", provider);
+    const { data: currentModels } = await admin.from("ai_models").select("model_id,enabled,recommended,suitability_score,recommendation_reason,health").eq("workspace_id", workspaceId).eq("provider_key", provider);
     const current = new Map((currentModels ?? []).map(row => [row.model_id, row]));
     const normalized = (result.models as Record<string,any>[]).map(raw => modelMetadata(provider, raw)).filter(model => model.model_id).map(model => ({
       workspace_id: workspaceId, provider_key: provider, model_id: model.model_id, display_name: model.display_name,
       enabled: current.get(model.model_id)?.enabled ?? false, is_free: model.is_free, capabilities: model.capabilities,
       context_window: model.context_window, supports_vision: model.supports_vision, supports_structured_output: model.supports_structured_output,
       input_usd_per_million: model.input_usd_per_million, output_usd_per_million: model.output_usd_per_million,
-      health: current.get(model.model_id) ? undefined : "unknown", suitability_score: current.get(model.model_id)?.suitability_score ?? 0, recommended: current.get(model.model_id)?.recommended ?? false, last_synced_at: checkedAt,
+      health: current.get(model.model_id)?.health ?? "unknown", suitability_score: current.get(model.model_id)?.suitability_score ?? 0, recommended: current.get(model.model_id)?.recommended ?? false, last_synced_at: checkedAt,
       recommendation_reason: current.get(model.model_id)?.recommendation_reason ?? "Newly discovered; enable explicitly before production routing.",
     }));
     for (let offset = 0; offset < normalized.length; offset += 500) {
