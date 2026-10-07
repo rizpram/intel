@@ -2,7 +2,7 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 export async function proxy(request: NextRequest) {
-  if (request.nextUrl.pathname === "/setup-required") return NextResponse.next();
+  if (request.nextUrl.pathname === "/setup-required" || request.nextUrl.pathname === "/auth/callback") return NextResponse.next();
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
   if (!url || !key) return NextResponse.redirect(new URL("/setup-required", request.url));
