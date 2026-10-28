@@ -135,7 +135,7 @@ create table public.ai_usage (
   provider text not null, model text not null, purpose text not null,
   confidence numeric(5,4) not null default 0,
   prompt_tokens integer, completion_tokens integer,
-  estimated_cost_usd numeric(12,8) not null default 0,
+  estimated_cost_usd numeric(12,8) default 0, -- null = provider did not supply cost and model pricing is unknown
   latency_ms integer not null default 0, escalated boolean not null default false,
   status text not null check(status in ('success','failed')), error_status text,
   created_at timestamptz not null default now()

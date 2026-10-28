@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, CheckCircle2, ChevronDown, ChevronRight, CircleAlert, KeyRound, RefreshCw, Save, ShieldCheck, Sparkles, Zap } from "lucide-react";
 
-type Model = { id: string; provider_key: string; model_id: string; display_name: string; enabled: boolean; is_free: boolean; capabilities: string[]; context_window: number | null; supports_vision: boolean; supports_structured_output: boolean; health: string; latency_ms: number | null; usage_count: number; error_count: number; error_rate?: number | null; input_usd_per_million: number | null; output_usd_per_million: number | null; estimated_cost_usd: number; suitability_score: number; recommended: boolean; recommendation_reason: string | null };
+type Model = { id: string; provider_key: string; model_id: string; display_name: string; enabled: boolean; is_free: boolean; capabilities: string[]; context_window: number | null; supports_vision: boolean; supports_structured_output: boolean; health: string; latency_ms: number | null; usage_count: number; unknown_cost_count?: number; error_count: number; error_rate?: number | null; input_usd_per_million: number | null; output_usd_per_million: number | null; estimated_cost_usd: number; suitability_score: number; recommended: boolean; recommendation_reason: string | null };
 type Route = { task_key: string; label: string; enabled: boolean; preset: string; primary_model: string; fallback_model: string; second_opinion_model: string; judge_model: string; recommended_model: string; confidence_threshold: number; escalation_rules: string[]; consensus_enabled: boolean };
 type Provider = { id: string; provider: string; baseUrl: string; defaultModel: string; enabled: boolean; hasApiKey: boolean; monthlyBudget: number; status?: string; latency_ms?: number; error_status?: string; checked_at?: string };
 
@@ -21,6 +21,13 @@ const escalationRuleLabels: Record<string, string> = { confidence_below: "Confid
 const routeModelFields: Record<string, keyof Route> = { primarymodel: "primary_model", fallbackmodel: "fallback_model", secondopinionmodel: "second_opinion_model", judgemodel: "judge_model" };
 
 export default function AiControlCenter() {
+  const [view, setView] = useState<"simple" | "advanced">("simple");
+  const [loading, setLoading] = useState(true);
+  const [simpleMode, setSimpleMode] = useState<{ provider: string; model: string } | null>(null);
+  const [simpleAllowed, setSimpleAllowed] = useState(true);
+  const [simpleProvider, setSimpleProvider] = useState("gemini");
+  const [simpleModel, setSimpleModel] = useState("gemini-2.5-flash");
+  const initialized = useRef(false);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [models, setModels] = useState<Model[]>([]);
   const [routes, setRoutes] = useState<Route[]>([]);
@@ -42,10 +49,16 @@ export default function AiControlCenter() {
       if (!response.ok) throw new Error(data.error || "AI settings require a workspace administrator sign-in.");
       setProviders(providerCatalog.map(item => data.providers.find((provider: Provider) => provider.provider === item.id) ?? { id: item.id, provider: item.id, baseUrl: item.baseUrl, defaultModel: "", enabled: false, hasApiKey: false, monthlyBudget: 0 }));
       setModels(data.models ?? []); setRoutes(data.routes ?? []); setPreset(data.preset ?? "ZERO COST"); setGlobalBudget(data.globalBudgetUsd ?? 0); setEncryptionReady(Boolean(data.encryptionReady));
+      setSimpleMode(data.simpleMode ?? null); setSimpleAllowed(data.simpleModeAllowed !== false);
+      if (!initialized.current) {
+        setSimpleProvider(data.simpleMode?.provider ?? "gemini");
+        setSimpleModel(data.simpleMode?.model ?? (data.providers.find((provider: Provider) => provider.provider === "gemini")?.defaultModel || "gemini-2.5-flash"));
+        initialized.current = true;
+      }
       setBases(previous => Object.fromEntries(providerCatalog.map(item => [item.id, previous[item.id] ?? data.providers.find((provider: Provider) => provider.provider === item.id)?.baseUrl ?? item.baseUrl])));
       setBudgets(previous => Object.fromEntries(providerCatalog.map(item => [item.id, previous[item.id] ?? String(data.providers.find((provider: Provider) => provider.provider === item.id)?.monthlyBudget ?? 0)])));
-      setMessage("");
     } catch (error) { setMessage(error instanceof Error ? error.message : "Could not load AI settings."); }
+    finally { setLoading(false); }
   }, []);
   useEffect(() => { void load(); }, [load]);
 
@@ -100,14 +113,44 @@ export default function AiControlCenter() {
     const data = await post("/api/ai/routes", { action: "preset", preset: value }, "preset");
     if (data) { setPreset(value); await load(); }
   }
+  const selectedProvider = providers.find(provider => provider.provider === simpleProvider);
+  const selectedProviderModels = models.filter(model => model.provider_key === simpleProvider);
+  const simpleMeta = providerCatalog.find(provider => provider.id === simpleProvider)!;
+  async function activateSimple() {
+    const data = await post("/api/ai/simple", { action: "activate", provider: simpleProvider, model: simpleModel, baseUrl: bases[simpleProvider] ?? simpleMeta.baseUrl, apiKey: keys[simpleProvider] ?? "", billingMode: "provider_quota" }, "simple");
+    if (data) { setKeys(previous => ({ ...previous, [simpleProvider]: "" })); await load(); setMessage(`Simple aktif: ${simpleMeta.name} / ${data.model}. Mengikuti kuota dan tagihan provider, tanpa budget aplikasi.`); }
+  }
+  async function activateAdvanced() {
+    const data = await post("/api/ai/simple", { action: "advanced" }, "simple");
+    if (data) { await load(); setMessage("Routing Advanced aktif. Aturan budget aplikasi berlaku kembali."); }
+  }
   const modelLabel = (value: string) => {
     if (value === "AUTO") return "AUTO";
     const model = models.find(item => `${item.provider_key}::${item.model_id}` === value);
     return model ? model.display_name : value.split("::").at(-1) ?? value;
   };
 
+  if (loading) return <section className="card ai-simple-panel" role="status">Memuat pengaturan AI…</section>;
   return <section className="ai-control-center">
+    <div className="ai-view-tabs" role="tablist" aria-label="Tampilan AI Control Center"><button role="tab" aria-selected={view === "simple"} onClick={() => setView("simple")}>Simple</button><button role="tab" aria-selected={view === "advanced"} onClick={() => setView("advanced")}>Advanced</button></div>
     {message && <div className={`ai-control-message ${message.toLowerCase().includes("could not") || message.toLowerCase().includes("failed") || message.toLowerCase().includes("required") ? "error" : ""}`} role="status">{message}</div>}
+    {view === "simple" ? <div className="card ai-simple-panel">
+      <div className="module-table-head"><div><h2>AI Simple</h2><p>Pilih provider dan model, lalu aktifkan. Tidak perlu mengisi budget aplikasi.</p></div><span className="synthetic-tag">{simpleMode ? "SIMPLE AKTIF" : "ROUTING ADVANCED AKTIF"}</span></div>
+      <div className="ai-simple-grid">
+        <label>Provider<select value={simpleProvider} onChange={event => { const provider = event.target.value; setSimpleProvider(provider); setSimpleModel(providers.find(item => item.provider === provider)?.defaultModel || ({ gemini: "gemini-2.5-flash", openrouter: "openrouter/free" } as Record<string,string>)[provider] || ""); }}>{providerCatalog.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>
+        <label>Model<input list="simple-ai-models" value={simpleModel} maxLength={200} onChange={event => setSimpleModel(event.target.value)} placeholder="Model ID dari provider"/><datalist id="simple-ai-models">{selectedProviderModels.map(model => <option key={model.id} value={model.model_id}>{model.display_name}</option>)}</datalist></label>
+        {simpleProvider === "custom" && <label>Provider URL<input type="url" value={bases.custom ?? ""} onChange={event => setBases(previous => ({ ...previous, custom: event.target.value }))} placeholder="https://api.example.com/v1"/></label>}
+        <label>API key<input type="password" autoComplete="new-password" value={keys[simpleProvider] ?? ""} onChange={event => setKeys(previous => ({ ...previous, [simpleProvider]: event.target.value }))} placeholder={selectedProvider?.hasApiKey ? "Tersimpan aman · kosongkan untuk tetap memakai key lama" : "Masukkan API key provider"}/></label>
+      </div>
+      <p className="ai-simple-health"><ShieldCheck size={16}/>{selectedProvider?.hasApiKey ? "Key tersimpan terenkripsi." : "Key belum tersimpan."} Koneksi: {selectedProvider?.status ?? "belum diuji"}{selectedProvider?.latency_ms != null ? ` · ${selectedProvider.latency_ms} ms` : ""}</p>
+      <div className="module-actions"><button className="button-secondary" disabled={Boolean(busy) || !selectedProvider || !encryptionReady} onClick={() => selectedProvider && void saveProvider(selectedProvider)}><Save size={15}/> Simpan key</button><button className="button-secondary" disabled={Boolean(busy) || !selectedProvider || (!selectedProvider.hasApiKey && !keys[simpleProvider])} onClick={() => selectedProvider && void providerAction(selectedProvider, "test")}><Activity size={15}/> Tes koneksi</button><button className="button-secondary" disabled={Boolean(busy) || !selectedProvider?.hasApiKey} onClick={() => selectedProvider && void providerAction(selectedProvider, "sync")}><RefreshCw size={15}/> Muat model</button></div>
+      <div className="ai-simple-billing"><b>Ikuti kuota / tagihan provider</b><p>Mode ini tidak memakai batas budget aplikasi. Kuota, rate limit, dan biaya mengikuti akun provider Anda. Ini bukan jaminan gratis. Token, penggunaan, dan estimasi biaya tetap dicatat; biaya yang belum diketahui ditampilkan sebagai tidak tersedia.</p><p>Hanya satu model dari provider pilihan yang dipakai. Tidak ada fallback ke OpenRouter atau provider lain. Task yang OFF tetap tidak dijalankan.</p></div>
+      {!encryptionReady && <p role="alert">Enkripsi credential server belum siap.</p>}
+      {!simpleAllowed && <p role="alert">Mode tanpa budget aplikasi dinonaktifkan administrator server.</p>}
+      {simpleMode && <p>Aktif sekarang: <b>{providerCatalog.find(provider => provider.id === simpleMode.provider)?.name ?? simpleMode.provider} / {simpleMode.model}</b></p>}
+      <button className="button-primary" disabled={Boolean(busy) || !encryptionReady || !simpleAllowed || !simpleModel.trim()} onClick={() => void activateSimple()}><Zap size={16}/>{busy === "simple" ? "Mengaktifkan…" : "Aktifkan AI tanpa budget aplikasi"}</button>
+    </div> : <>
+    {simpleMode && <div className="ai-control-message"><p>Simple sedang aktif: {simpleMode.provider} / {simpleMode.model}. Pengaturan Advanced di bawah disimpan untuk dipakai setelah mode Advanced diaktifkan.</p><button className="button-secondary" disabled={Boolean(busy)} onClick={() => void activateAdvanced()}>Aktifkan routing dan budget Advanced</button></div>}
     <div className="card ai-provider-panel">
       <div className="module-table-head"><div><h2>Providers</h2><p>Credentials are encrypted server-side; stored keys are never returned to this page.</p></div><span className="synthetic-tag">{encryptionReady ? "ENCRYPTION READY" : "ENCRYPTION KEY REQUIRED"}</span></div>
       <div className="ai-provider-grid">{providers.map(provider => {
@@ -148,7 +191,8 @@ export default function AiControlCenter() {
 
     <div className="card ai-model-registry">
       <div className="module-table-head"><div><h2>Unified Model Registry</h2><p>Models span all configured providers. Newly discovered entries start disabled.</p></div><span className="synthetic-tag">{models.length} MODELS</span></div>
-      {models.length ? <div className="ai-model-table"><div className="ai-model-head"><span>MODEL</span><span>CAPABILITIES</span><span>HEALTH / LATENCY</span><span>USAGE / COST</span><span>ROUTE</span></div>{models.map(model=><div className="ai-model-row" key={model.id}><div><b>{model.display_name}</b>{model.recommended&&<span className="ai-recommended"><Sparkles size={10}/> Recommended</span>}<small>{model.provider_key} · {model.model_id}</small><small>Suitability {Math.round(model.suitability_score)}/100{model.error_rate!=null?` · ${(model.error_rate*100).toFixed(1)}% errors`:" · awaiting telemetry"}</small></div><div className="ai-model-tags"><span className={model.is_free?"free":"paid"}>{model.is_free?"FREE":"PAID"}</span>{model.supports_vision&&<span>Vision</span>}{model.supports_structured_output&&<span>JSON</span>}{model.context_window&&<span>{Math.round(model.context_window/1000)}K ctx</span>}</div><div><i className={`ai-health-dot ${model.health}`}/>{model.health}{model.latency_ms!=null&&<small>{model.latency_ms} ms</small>}</div><div>{model.usage_count.toLocaleString()} calls<small>${Number(model.estimated_cost_usd||0).toFixed(4)} est.</small>{!model.is_free&&<div className="ai-model-rates"><input aria-label={`${model.display_name} input price per million`} type="number" min="0" step="0.01" placeholder={`In ${model.input_usd_per_million ?? "?"}`} value={prices[`${model.id}:in`] ?? ""} onChange={event=>setPrices(previous=>({...previous,[`${model.id}:in`]:event.target.value}))}/><input aria-label={`${model.display_name} output price per million`} type="number" min="0" step="0.01" placeholder={`Out ${model.output_usd_per_million ?? "?"}`} value={prices[`${model.id}:out`] ?? ""} onChange={event=>setPrices(previous=>({...previous,[`${model.id}:out`]:event.target.value}))}/><button onClick={()=>void savePrices(model)}>Save pricing</button></div>}</div><div><button className={`ai-switch ${model.enabled?"on":""}`} aria-label={`${model.enabled?"Disable":"Enable"} ${model.display_name}`} onClick={()=>void toggleModel(model)}>{model.enabled?"ON":"OFF"}</button></div></div>)}</div> : <div className="ai-empty-models"><CircleAlert size={16}/><span>No synced models yet. Save a provider, test it, then sync its model catalog.</span></div>}
+      {models.length ? <div className="ai-model-table"><div className="ai-model-head"><span>MODEL</span><span>CAPABILITIES</span><span>HEALTH / LATENCY</span><span>USAGE / COST</span><span>ROUTE</span></div>{models.map(model=><div className="ai-model-row" key={model.id}><div><b>{model.display_name}</b>{model.recommended&&<span className="ai-recommended"><Sparkles size={10}/> Recommended</span>}<small>{model.provider_key} · {model.model_id}</small><small>Suitability {Math.round(model.suitability_score)}/100{model.error_rate!=null?` · ${(model.error_rate*100).toFixed(1)}% errors`:" · awaiting telemetry"}</small></div><div className="ai-model-tags"><span className={model.is_free?"free":"paid"}>{model.is_free?"FREE":"PAID"}</span>{model.supports_vision&&<span>Vision</span>}{model.supports_structured_output&&<span>JSON</span>}{model.context_window&&<span>{Math.round(model.context_window/1000)}K ctx</span>}</div><div><i className={`ai-health-dot ${model.health}`}/>{model.health}{model.latency_ms!=null&&<small>{model.latency_ms} ms</small>}</div><div>{model.usage_count.toLocaleString()} calls<small>{model.unknown_cost_count ? `${model.unknown_cost_count} panggilan: biaya belum tersedia` : `$${Number(model.estimated_cost_usd||0).toFixed(4)} est.`}</small>{!model.is_free&&<div className="ai-model-rates"><input aria-label={`${model.display_name} input price per million`} type="number" min="0" step="0.01" placeholder={`In ${model.input_usd_per_million ?? "?"}`} value={prices[`${model.id}:in`] ?? ""} onChange={event=>setPrices(previous=>({...previous,[`${model.id}:in`]:event.target.value}))}/><input aria-label={`${model.display_name} output price per million`} type="number" min="0" step="0.01" placeholder={`Out ${model.output_usd_per_million ?? "?"}`} value={prices[`${model.id}:out`] ?? ""} onChange={event=>setPrices(previous=>({...previous,[`${model.id}:out`]:event.target.value}))}/><button onClick={()=>void savePrices(model)}>Save pricing</button></div>}</div><div><button className={`ai-switch ${model.enabled?"on":""}`} aria-label={`${model.enabled?"Disable":"Enable"} ${model.display_name}`} onClick={()=>void toggleModel(model)}>{model.enabled?"ON":"OFF"}</button></div></div>)}</div> : <div className="ai-empty-models"><CircleAlert size={16}/><span>No synced models yet. Save a provider, test it, then sync its model catalog.</span></div>}
     </div>
+    </>}
   </section>;
 }
